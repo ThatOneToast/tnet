@@ -1,0 +1,10 @@
+[package]
+name = "tnet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tnet_proc_macros = { path = "tnet_proc_macros" }
+serde = { version = "1.0.215", features = ["derive"] }
+colored = "2.1.0"
+bincode = "1.3.3"
