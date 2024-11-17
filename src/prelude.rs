@@ -5,3 +5,4 @@ pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
 pub use tnet_proc_macros::Packet as DPacket;
 /// Derive macro for Session
 pub use tnet_proc_macros::Session as DSession;
+pub use t_logger as tlog;

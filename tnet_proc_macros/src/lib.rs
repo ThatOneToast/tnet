@@ -35,15 +35,14 @@ pub fn derive_session(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
 
-    // Look for field named "session_id"
+    // Look for field with #[session_id] attribute
     let id_field = if let Data::Struct(data) = &input.data {
         if let Fields::Named(fields) = &data.fields {
             fields.named.iter().find(|field| {
-                if let Some(ident) = &field.ident {
-                    ident == "session_id"
-                } else {
-                    false
-                }
+                field
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("session_id"))
             })
         } else {
             None
@@ -52,16 +51,17 @@ pub fn derive_session(input: TokenStream) -> TokenStream {
         None
     };
 
-    let get_id_impl = if let Some(_field) = id_field {
+    let get_id_impl = if let Some(field) = id_field {
+        let field_name = &field.ident;
         quote! {
             fn get_id(&self) -> String {
-                self.session_id.clone()
+                self.#field_name.clone()
             }
         }
     } else {
         quote! {
             fn get_id(&self) -> String {
-                format!("{:?}", self)
+                format!("DID NOT ADD `#[session_id]` ATTRIBUTE TO {}", std::any::type_name::<Self>())
             }
         }
     };
