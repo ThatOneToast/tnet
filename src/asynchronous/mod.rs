@@ -1,4 +1,4 @@
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", feature = "async"))]
 pub mod client;
-#[cfg(feature = "server")]
+#[cfg(feature = "async")]
 pub mod listener;

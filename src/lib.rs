@@ -1,11 +1,11 @@
+#[cfg(feature = "async")]
+pub mod asynchronous;
 #[cfg(feature = "transaction")]
 pub mod packet;
 pub mod prelude;
 #[cfg(feature = "transaction")]
 pub mod session;
 pub mod standard;
-#[cfg(feature = "async")]
-pub mod asynchronous;
 
 pub fn init() {
     tlogger::opts::set_debug(false);
