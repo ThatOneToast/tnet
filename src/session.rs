@@ -108,7 +108,9 @@ use serde::{de::DeserializeOwned, Serialize};
 /// * Include timestamps for session validity checking
 /// * Use secure methods for generating session IDs
 /// * Handle serialization errors gracefully
-pub trait Session: std::fmt::Debug + Any + Send + Sync + Clone + Default + Serialize + DeserializeOwned{
+pub trait Session:
+    std::fmt::Debug + Any + Send + Sync + Clone + Default + Serialize + DeserializeOwned
+{
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -116,7 +118,7 @@ pub trait Session: std::fmt::Debug + Any + Send + Sync + Clone + Default + Seria
         self
     }
     fn get_id(&self) -> String;
-    
+
     fn encode(&self) -> Vec<u8> {
         bincode::serialize(self).unwrap()
     }

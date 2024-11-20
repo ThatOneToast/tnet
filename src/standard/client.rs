@@ -3,7 +3,7 @@ use std::{
     net::TcpStream,
 };
 
-use t_logger::prelude::*;
+use tlogger::prelude::*;
 
 use crate::{
     packet::{NetErrorPacket, NetWrapperPacket, Packet},
@@ -169,6 +169,10 @@ impl<S: Session> Client<S> {
                     error_packet.error,
                 ));
             } else {
+                error!(
+                    "Critical Error",
+                    "When establishing a session, got an unexpected packet type"
+                );
                 panic!("Something horrible happened.");
             }
         }

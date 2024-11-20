@@ -10,7 +10,7 @@ use crate::{
     session::Session,
 };
 
-use t_logger::prelude::*;
+use tlogger::prelude::*;
 
 pub fn default_auth_handler(username: &str, password: &str) -> bool {
     if username == "toast" && password == "toast" {
@@ -129,8 +129,8 @@ pub fn default_ok_handler<S: Session, P: Packet>(
 /// }
 ///```
 pub struct Listener<S: Session + Send + 'static, P: Packet + Send + 'static> {
-    listener: TcpListener,
-    sessions: Arc<RwLock<HashMap<String, S>>>,
+    pub listener: TcpListener,
+    pub sessions: Arc<RwLock<HashMap<String, S>>>,
     ok_handler: Arc<dyn Fn(&mut S, P, &mut TcpStream) + Send + Sync>,
     auth_handler: Arc<dyn Fn(&str, &str) -> bool + Send + Sync>,
     pub allow_passthrough: bool,
@@ -350,4 +350,41 @@ impl<S: Session + Send, P: Packet + Send> Listener<S, P> {
             });
         }
     }
+}
+
+/// Macro to read and decode a packet from a TCP stream
+///
+/// # Arguments
+/// * `$stream:expr` - The TcpStream to read from
+/// * `$packet_type:ty` - The type of packet to decode into
+///
+/// # Returns
+/// * `Result<$packet_type, std::io::Error>` - The decoded packet or an error
+///
+/// # Example
+/// ```rust
+/// let packet: DicePacket = read_packet!(stream, DicePacket)?;
+/// ```
+#[macro_export]
+macro_rules! read_packet {
+    ($stream:expr, $packet_type:ty) => {{
+        let mut buf = [0; 1024];
+        match $stream.read(&mut buf) {
+            Ok(0) => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Connection closed",
+            )),
+            Ok(_) => {
+                let wrapper: NetWrapperPacket = NetWrapperPacket::decode(&buf);
+                match wrapper.packet {
+                    Some(packet_data) => Ok(<$packet_type>::decode(&packet_data)),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "No packet data received",
+                    )),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }};
 }
