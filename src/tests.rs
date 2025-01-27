@@ -95,6 +95,13 @@ impl Packet for TestPacket {
             },
         }
     }
+    
+    fn keep_alive() -> Self {
+        Self {
+            header: "KEEP_ALIVE".to_string(),
+            body: PacketBody::default(),
+        }
+    }
 }
 
 #[tokio::test]

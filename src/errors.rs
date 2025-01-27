@@ -16,7 +16,13 @@ pub enum Error {
 
     #[error("IO error: {0}")]
     IoError(String),
+    
+    #[error("DB error: {0}")]
+    DbError(String),
 
     #[error("Encryption error: {0}")]
     EncryptionError(String),
+    
+    #[error("Error: {0}")]
+    Other(String),
 }

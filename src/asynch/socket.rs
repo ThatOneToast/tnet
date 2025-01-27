@@ -1,20 +1,28 @@
 use std::sync::Arc;
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::RwLock};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::{Mutex, RwLock},
+};
 
-use crate::{encrypt::Encryptor, errors::Error, packet::Packet, session::{self, Sessions}};
+use crate::{
+    encrypt::Encryptor,
+    errors::Error,
+    packet::Packet,
+    session::{self, Sessions},
+};
 
-
+#[derive(Clone)]
 pub struct TSocket<S>
 where
     S: session::Session,
 {
-    pub socket: TcpStream,
+    pub socket: Arc<Mutex<TcpStream>>,
     pub session_id: Option<String>,
     pub encryptor: Option<Encryptor>,
     sessions: Arc<RwLock<Sessions<S>>>,
 }
-
 
 impl<S> TSocket<S>
 where
@@ -22,7 +30,7 @@ where
 {
     pub fn new(socket: TcpStream, sessions: Arc<RwLock<Sessions<S>>>) -> Self {
         Self {
-            socket,
+            socket: Arc::new(Mutex::new(socket)),
             session_id: None,
             encryptor: None,
             sessions,
@@ -74,13 +82,41 @@ where
         }
     }
 
-    pub async fn recv<P: Packet>(&mut self) -> Result<P, Error> {
-        let mut buf = vec![0; 4096];
-        let n = self
-            .socket
-            .read(&mut buf)
+    pub async fn send<P: Packet>(&mut self, packet: P) -> Result<(), Error> {
+        let data = match &self.encryptor {
+            Some(encryptor) => {
+                println!("TSocket encrypting packet");
+                packet.encrypted_ser(encryptor)
+            }
+            None => {
+                println!("TSocket sending unencrypted packet");
+                packet.ser()
+            }
+        };
+
+        println!("TSocket sending {} bytes", data.len());
+        let mut socket = self.socket.lock().await;
+        socket
+            .write_all(&data)
             .await
             .map_err(|e| Error::IoError(e.to_string()))?;
+        socket
+            .flush()
+            .await
+            .map_err(|e| Error::IoError(e.to_string()))?;
+        Ok(())
+    }
+
+    // Update recv method to handle locked socket
+    pub async fn recv<P: Packet>(&mut self) -> Result<P, Error> {
+        let mut buf = vec![0; 4096];
+        let n = {
+            let mut socket = self.socket.lock().await;
+            socket
+                .read(&mut buf)
+                .await
+                .map_err(|e| Error::IoError(e.to_string()))?
+        };
 
         if n == 0 {
             return Err(Error::ConnectionClosed);
@@ -96,31 +132,5 @@ where
             }
             None => P::de(&buf),
         })
-    }
-
-    pub async fn send<P: Packet>(&mut self, packet: P) -> Result<(), Error> {
-        let data = match &self.encryptor {
-            Some(encryptor) => {
-                println!("TSocket encrypting packet");
-                let json = serde_json::to_string(&packet).expect("Failed to serialize packet");
-                println!("Sending JSON: {}", json);
-                packet.encrypted_ser(encryptor)
-            }
-            None => {
-                println!("TSocket sending unencrypted packet");
-                packet.ser()
-            }
-        };
-
-        println!("TSocket sending {} bytes", data.len());
-        self.socket
-            .write_all(&data)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
-        self.socket
-            .flush()
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
-        Ok(())
     }
 }

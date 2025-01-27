@@ -1,7 +1,15 @@
 use std::{
-    io::{Read, Write},
     marker::PhantomData,
-    net::TcpStream,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc,
 };
 
 use crate::{
@@ -10,6 +18,7 @@ use crate::{
     packet,
 };
 
+#[derive(Clone)]
 pub enum ClientEncryption {
     None,
     Encrypted(Encryptor),
@@ -32,15 +41,46 @@ impl Default for EncryptionConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct KeepAliveConfig {
+    pub enabled: bool,
+    pub interval: u64, // in seconds
+}
+
+impl Default for KeepAliveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: 30,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ClientMessage {
+    Data(Vec<u8>),
+    Keepalive(Vec<u8>),
+    Ping(tokio::sync::oneshot::Sender<bool>),
+}
+
+#[derive(Debug)]
+struct ConnectionHandler {
+    writer_tx: mpsc::Sender<ClientMessage>,
+    reader_tx: mpsc::Sender<Vec<u8>>,
+}
+
 pub struct AsyncClient<P>
 where
     P: packet::Packet,
 {
-    server: TcpStream,
+    connection: ConnectionHandler,
     pub(crate) encryption: ClientEncryption,
     session_id: Option<String>,
     user: Option<String>,
     pass: Option<String>,
+    keep_alive: KeepAliveConfig,
+    keep_alive_running: Arc<AtomicBool>,
+    response_rx: mpsc::Receiver<Vec<u8>>,
     _packet: PhantomData<P>,
 }
 
@@ -48,15 +88,86 @@ impl<P> AsyncClient<P>
 where
     P: packet::Packet,
 {
-    pub fn new(ip: &str, port: u16) -> Self {
-        Self {
-            server: TcpStream::connect((ip, port)).unwrap(),
+    pub async fn new(ip: &str, port: u16) -> Result<Self, Error> {
+        // Connect with error handling
+        let server = tokio::net::TcpStream::connect((ip, port))
+            .await
+            .map_err(|e| Error::IoError(e.to_string()))?;
+
+        let (writer_tx, mut writer_rx) = mpsc::channel::<ClientMessage>(32);
+        let (reader_tx, reader_rx) = mpsc::channel::<Vec<u8>>(32);
+
+        // Split the connection
+        let (mut read_half, mut write_half) = server.into_split();
+
+        // Spawn writer task
+        tokio::spawn({
+            async move {
+                while let Some(msg) = writer_rx.recv().await {
+                    match msg {
+                        ClientMessage::Data(data) | ClientMessage::Keepalive(data) => {
+                            if let Err(e) = write_half.write_all(&data).await {
+                                eprintln!("Write error: {}", e);
+                                break;
+                            }
+                            if let Err(e) = write_half.flush().await {
+                                eprintln!("Flush error: {}", e);
+                                break;
+                            }
+                        }
+                        ClientMessage::Ping(response) => {
+                            let _ = response.send(true);
+                        }
+                    }
+                }
+            }
+        });
+
+        // Clone reader_tx before moving it
+        let reader_tx_clone = reader_tx.clone();
+
+        // Spawn reader task
+        tokio::spawn({
+            async move {
+                let mut buf = vec![0; 4096];
+                loop {
+                    match read_half.read(&mut buf).await {
+                        Ok(n) if n > 0 => {
+                            let data = buf[..n].to_vec();
+                            if let Err(e) = reader_tx_clone.send(data).await {
+                                eprintln!("Reader send error: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(n) => {
+                            if n == 0 {
+                                println!("Connection closed by peer");
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("Read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            connection: ConnectionHandler {
+                writer_tx,
+                reader_tx,
+            },
             encryption: ClientEncryption::None,
             session_id: None,
             user: None,
             pass: None,
+            keep_alive: KeepAliveConfig::default(),
+            keep_alive_running: Arc::new(AtomicBool::new(false)),
+            response_rx: reader_rx,
             _packet: PhantomData,
-        }
+        })
     }
 
     pub fn with_credentials(mut self, user: &str, pass: &str) -> Self {
@@ -65,7 +176,28 @@ where
         self
     }
 
-    pub async fn with_encryption_config(mut self, config: EncryptionConfig) -> std::io::Result<Self> {
+    pub async fn is_connected(&mut self) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Err(_) = self
+            .connection
+            .writer_tx
+            .send(ClientMessage::Ping(tx))
+            .await
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub fn with_keep_alive(mut self, config: KeepAliveConfig) -> Self {
+        self.keep_alive = config;
+        self
+    }
+
+    pub async fn with_encryption_config(
+        mut self,
+        config: EncryptionConfig,
+    ) -> std::io::Result<Self> {
         if !config.enabled {
             return Ok(self);
         }
@@ -76,22 +208,35 @@ where
         }
 
         if config.auto_key_exchange {
-            self.establish_encrypted_connection()?;
+            self.establish_encrypted_connection().await?;
         }
 
         // After encryption setup, handle authentication response
-        if self.user.is_some() {
+        if let (Some(user), Some(pass)) = (&self.user, &self.pass) {
+            let mut auth_packet = P::ok(); // or create a specific auth packet type
+            auth_packet.body_mut().username = Some(user.clone());
+            auth_packet.body_mut().password = Some(pass.clone());
+            self.send(auth_packet)
+                .await
+                .expect("Failed to send auth packet");
+
+            // Wait for authentication response
             match self.recv().await {
                 Ok(mut response) => {
                     if let Some(id) = response.session_id(None) {
                         println!("Authentication successful, received session ID: {}", id);
                         self.session_id = Some(id);
+                    } else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "No session ID received".to_string(),
+                        ));
                     }
                 }
                 Err(e) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        format!("Authentication failed: {}", e),
+                        e.to_string(),
                     ));
                 }
             }
@@ -100,22 +245,39 @@ where
         Ok(self)
     }
 
-    fn establish_encrypted_connection(&mut self) -> std::io::Result<()> {
+    async fn establish_encrypted_connection(&mut self) -> std::io::Result<()> {
         println!("Starting encrypted connection setup");
 
         let key_exchange = KeyExchange::new();
         let public_key = key_exchange.get_public_key();
 
-        println!("Sending public key");
-        self.server.write_all(&public_key)?;
-        self.server.flush()?;
+        // Send our public key
+        self.connection
+            .writer_tx
+            .send(ClientMessage::Data(public_key.to_vec()))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-        let mut server_public = [0u8; 32];
-        println!("Waiting for server's public key");
-        self.server.read_exact(&mut server_public)?;
+        // Receive server's public key
+        let server_public = self.response_rx.recv().await.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "Connection closed while waiting for server's public key",
+            )
+        })?;
+
+        if server_public.len() != 32 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid server public key length",
+            ));
+        }
+
+        let mut server_public_key = [0u8; 32];
+        server_public_key.copy_from_slice(&server_public[..32]);
 
         println!("Computing shared secret");
-        let shared_secret = key_exchange.compute_shared_secret(&server_public);
+        let shared_secret = key_exchange.compute_shared_secret(&server_public_key);
 
         println!("Setting up encryption");
         self.encryption = ClientEncryption::Encrypted(Encryptor::new(&shared_secret));
@@ -124,6 +286,10 @@ where
     }
 
     pub async fn send(&mut self, mut packet: P) -> Result<(), Error> {
+        if !self.is_connected().await {
+            return Err(Error::ConnectionClosed);
+        }
+
         if let Some(id) = self.session_id.to_owned() {
             println!("Setting session ID: {}", id);
             packet.session_id(Some(id));
@@ -143,29 +309,26 @@ where
         };
 
         println!("Sending {} bytes", data.len());
-        self.server
-            .write_all(&data)
-            .expect("Failed to write packet.");
-        self.server.flush().unwrap();
+        self.connection
+            .writer_tx
+            .send(ClientMessage::Data(data))
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?;
         Ok(())
     }
 
     pub async fn recv(&mut self) -> Result<P, Error> {
-        let mut buf = vec![0; 4096]; // Increased buffer size
-        let n = self.server.read(&mut buf).expect("Failed to read buffer");
-
-        if n == 0 {
-            return Err(Error::ConnectionClosed);
-        }
-
-        println!("Received {} bytes", n);
-        buf.truncate(n);
+        let data = self
+            .response_rx
+            .recv()
+            .await
+            .ok_or_else(|| Error::ConnectionClosed)?;
 
         let mut packet = match &self.encryption {
-            ClientEncryption::None => P::de(&buf),
+            ClientEncryption::None => P::de(&data),
             ClientEncryption::Encrypted(encryptor) => {
                 println!("Decrypting packet");
-                P::encrypted_de(&buf, encryptor)
+                P::encrypted_de(&data, encryptor)
             }
         };
 
@@ -180,5 +343,62 @@ where
     pub async fn send_recv(&mut self, packet: P) -> Result<P, Error> {
         self.send(packet).await?;
         self.recv().await
+    }
+
+    pub async fn start_keepalive(&mut self) -> Result<(), Error>
+    where
+        P: 'static,
+    {
+        if !self.keep_alive.enabled || self.keep_alive_running.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let session_id = self
+            .session_id
+            .clone()
+            .ok_or_else(|| Error::Other("Cannot start keepalive without session ID".to_string()))?;
+
+        let interval = self.keep_alive.interval;
+        let encryption = self.encryption.clone();
+        let keep_alive_running = self.keep_alive_running.clone();
+        let writer_tx = self.connection.writer_tx.clone();
+        keep_alive_running.store(true, Ordering::SeqCst);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval));
+
+            while keep_alive_running.load(Ordering::SeqCst) {
+                interval.tick().await;
+
+                let mut packet = P::keep_alive();
+                packet.session_id(Some(session_id.clone()));
+
+                let data = match &encryption {
+                    ClientEncryption::None => packet.ser(),
+                    ClientEncryption::Encrypted(encryptor) => packet.encrypted_ser(encryptor),
+                };
+
+                if writer_tx
+                    .send(ClientMessage::Keepalive(data))
+                    .await
+                    .is_err()
+                {
+                    keep_alive_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                println!("Keepalive packet sent");
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn stop_keepalive(&mut self) {
+        self.keep_alive_running.store(false, Ordering::SeqCst);
+    }
+
+    // Add a method to check if keepalive is running
+    pub fn is_keepalive_running(&self) -> bool {
+        self.keep_alive_running.load(Ordering::SeqCst)
     }
 }

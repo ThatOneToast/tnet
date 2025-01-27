@@ -47,4 +47,5 @@ pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
 
     fn ok() -> Self;
     fn error(error: Error) -> Self;
+    fn keep_alive() -> Self;
 }

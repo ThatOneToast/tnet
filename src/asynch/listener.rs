@@ -1,11 +1,7 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use futures::future::BoxFuture;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::RwLock,
-};
+use tokio::{net::TcpListener, sync::RwLock, io::{AsyncReadExt, AsyncWriteExt}};
 
 use crate::{
     encrypt::{Encryptor, KeyExchange},
@@ -56,7 +52,8 @@ where
         // Start the background cleanup task
         let sessions_clone = sessions.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(clean_interval));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(clean_interval));
             loop {
                 interval.tick().await;
                 sessions_clone.write().await.clear_expired();
@@ -90,20 +87,26 @@ where
 
     async fn handle_encryption_handshake(
         &self,
-        socket: &mut TcpStream,
+        socket: &mut TSocket<S>,
     ) -> std::io::Result<Encryptor> {
         println!("Starting encryption handshake");
 
         let mut client_public = [0u8; 32];
         println!("Reading client's public key");
-        socket.read_exact(&mut client_public).await?;
+        {
+            let mut sock = socket.socket.lock().await;
+            sock.read_exact(&mut client_public).await?;
+        }
 
         let key_exchange = KeyExchange::new();
         let server_public = key_exchange.get_public_key();
 
         println!("Sending server's public key");
-        socket.write_all(&server_public).await?;
-        socket.flush().await?;
+        {
+            let mut sock = socket.socket.lock().await;
+            sock.write_all(&server_public).await?;
+            sock.flush().await?;
+        }
 
         println!("Computing shared secret");
         let shared_secret = key_exchange.compute_shared_secret(&client_public);
@@ -116,11 +119,11 @@ where
         tsocket: &mut TSocket<S>,
     ) -> Result<Option<Encryptor>, Error> {
         self.sessions.write().await.clear_expired();
-        
+
         // Step 1: Handle Encryption Setup
         let encryptor = if self.encryption.enabled {
             let enc = self
-                .handle_encryption_handshake(&mut tsocket.socket)
+                .handle_encryption_handshake(tsocket)
                 .await
                 .map_err(|e| Error::EncryptionError(e.to_string()))?;
             tsocket.encryptor = Some(enc.clone()); // Set the encryptor in TSocket
@@ -201,28 +204,48 @@ where
                     println!("Accepted connection from {}", addr);
 
                     let mut tsocket = TSocket::new(socket, self.sessions.clone());
+                    let ok_handler = self.ok_handler.clone();
+                    let error_handler = self.error_handler.clone();
 
-                    // Handle authentication and encryption
                     match self.handle_authentication(&mut tsocket).await {
                         Ok(_) => {
-                            // Create session if it hasn't been created during authentication
-                            if tsocket.session_id.is_none() {
-                                let ses_id = uuid::Uuid::new_v4().to_string();
-                                let ses = S::empty(ses_id.clone());
-                                tsocket.session_id = Some(ses_id.clone());
-                                self.sessions.write().await.new_session(ses);
-                            }
-
-                            let ok_handler = self.ok_handler.clone();
-
-                            // Call handler with the packet received during authentication
-                            if let Ok(packet) = tsocket.recv::<P>().await {
-                                ok_handler(tsocket, packet).await;
-                            }
+                            tokio::spawn(async move {
+                                loop {
+                                    match tsocket.recv::<P>().await {
+                                        Ok(packet) => {
+                                            if packet.header() == P::keep_alive().header() {
+                                                // Handle keepalive
+                                                let mut response = P::keep_alive();
+                                                if let Some(id) = &tsocket.session_id {
+                                                    response.session_id(Some(id.clone()));
+                                                }
+                                                if let Err(e) = tsocket.send(response).await {
+                                                    eprintln!(
+                                                        "Failed to send keepalive response: {}",
+                                                        e
+                                                    );
+                                                    break;
+                                                }
+                                                println!("Keepalive received and responded");
+                                            } else {
+                                                // Handle regular message
+                                                ok_handler(tsocket.clone(), packet).await;
+                                                // Don't break here - continue handling messages
+                                            }
+                                        }
+                                        Err(Error::ConnectionClosed) => {
+                                            println!("Client disconnected");
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            error_handler(tsocket.clone(), e).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
                         }
                         Err(e) => {
-                            let error_handler = self.error_handler.clone();
-                            eprintln!("Authentication failed: {}", e);
                             error_handler(tsocket, e).await;
                         }
                     }

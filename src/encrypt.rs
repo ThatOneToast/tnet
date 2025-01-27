@@ -24,6 +24,7 @@ impl Encryptor {
         key
     }
 
+
     pub fn encrypt(&self, data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
         let mut nonce = [0u8; 12];
         OsRng.fill_bytes(&mut nonce);
