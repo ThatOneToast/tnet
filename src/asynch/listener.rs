@@ -95,10 +95,7 @@ where
         &self,
         socket: &mut TSocket<S>,
     ) -> std::io::Result<Encryptor> {
-        println!("Starting encryption handshake");
-
         let mut client_public = [0u8; 32];
-        println!("Reading client's public key");
         {
             let mut sock = socket.socket.lock().await;
             sock.read_exact(&mut client_public).await?;
@@ -107,14 +104,12 @@ where
         let key_exchange = KeyExchange::new();
         let server_public = key_exchange.get_public_key();
 
-        println!("Sending server's public key");
         {
             let mut sock = socket.socket.lock().await;
             sock.write_all(&server_public).await?;
             sock.flush().await?;
         }
 
-        println!("Computing shared secret");
         let shared_secret = key_exchange.compute_shared_secret(&client_public);
 
         Ok(Encryptor::new(&shared_secret))
@@ -211,7 +206,6 @@ where
         // Send to all connected clients in the keep_alive_pool
         for socket in self.keep_alive_pool.sockets.write().await.iter_mut() {
             socket.send(packet.clone()).await?;
-            
         }
         Ok(())
     }
@@ -254,7 +248,6 @@ where
                                                         keep_alive_pool.add(socket_clone).await;
                                                     }
                                                 }
-                                                println!("Keepalive received and responded");
                                             } else {
                                                 // Handle regular message
                                                 ok_handler(tsocket.clone(), packet).await;

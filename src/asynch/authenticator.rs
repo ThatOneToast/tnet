@@ -25,33 +25,23 @@ pub struct Authenticator {
 
 impl Authenticator {
     pub async fn authenticate(&mut self, username: String, password: String) -> Result<(), Error> {
-        println!("Attempting authentication with type: {:?}", self.auth_type);
-        println!("Username: {}, Password: {}", username, password);
-
         match self.auth_type {
             AuthType::RootPassword => {
                 if self.root_password.is_none() {
-                    println!("No root password configured");
                     return Err(Error::InvalidCredentials);
                 }
                 if username != "root" || &password != self.root_password.as_ref().unwrap() {
-                    println!("Invalid root credentials");
                     return Err(Error::InvalidCredentials);
                 }
-                println!("Root authentication successful");
             }
             AuthType::UserPassword => {
                 if self.auth_fn.is_none() {
-                    println!("No auth function configured");
                     return Err(Error::InvalidCredentials);
                 }
                 let auth_fn = self.auth_fn.as_ref().unwrap();
                 auth_fn(username, password).await?;
-                println!("User authentication successful");
             }
-            AuthType::None => {
-                println!("No authentication required");
-            }
+            AuthType::None => {}
         }
         Ok(())
     }

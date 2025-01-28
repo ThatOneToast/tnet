@@ -30,15 +30,18 @@ where
             sockets: Arc::new(RwLock::new(Vec::new())),
         }
     }
-    
+
     pub async fn add(&mut self, socket: TSocket<S>) {
         self.sockets.write().await.push(socket);
     }
-    
+
     pub async fn remove(&mut self, socket: &TSocket<S>) {
-        self.sockets.write().await.retain(|s| s.session_id != socket.session_id);
+        self.sockets
+            .write()
+            .await
+            .retain(|s| s.session_id != socket.session_id);
     }
-    
+
     pub async fn broadcast<P: Packet>(&self, packet: P) {
         for socket in self.sockets.write().await.iter_mut() {
             socket.send(packet.clone()).await.unwrap();
@@ -117,17 +120,10 @@ where
 
     pub async fn send<P: Packet>(&mut self, packet: P) -> Result<(), Error> {
         let data = match &self.encryptor {
-            Some(encryptor) => {
-                println!("TSocket encrypting packet");
-                packet.encrypted_ser(encryptor)
-            }
-            None => {
-                println!("TSocket sending unencrypted packet");
-                packet.ser()
-            }
+            Some(encryptor) => packet.encrypted_ser(encryptor),
+            None => packet.ser(),
         };
 
-        println!("TSocket sending {} bytes", data.len());
         let mut socket = self.socket.lock().await;
         socket
             .write_all(&data)
@@ -155,14 +151,10 @@ where
             return Err(Error::ConnectionClosed);
         }
 
-        println!("TSocket received {} bytes", n);
         buf.truncate(n);
 
         Ok(match &self.encryptor {
-            Some(encryptor) => {
-                println!("TSocket decrypting packet");
-                P::encrypted_de(&buf, encryptor)
-            }
+            Some(encryptor) => P::encrypted_de(&buf, encryptor),
             None => P::de(&buf),
         })
     }

@@ -37,9 +37,8 @@ where
     pub fn delete_session(&mut self, id: &str) {
         self.sessions.retain(|s| s.id() != id);
     }
-    
+
     pub fn clear_expired(&mut self) {
-        println!("Session Clear Wave");
         self.sessions.retain(|s| !s.is_expired());
     }
 }
@@ -73,4 +72,3 @@ pub trait Session: Debug + Clone + Send + Sync + Serialize + DeserializeOwned {
         serde_json::from_slice(data).unwrap()
     }
 }
-

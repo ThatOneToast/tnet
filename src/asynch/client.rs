@@ -235,7 +235,6 @@ where
             match self.recv().await {
                 Ok(mut response) => {
                     if let Some(id) = response.session_id(None) {
-                        println!("Authentication successful, received session ID: {}", id);
                         self.session_id = Some(id);
                     } else {
                         return Err(std::io::Error::new(
@@ -257,8 +256,6 @@ where
     }
 
     async fn establish_encrypted_connection(&mut self) -> std::io::Result<()> {
-        println!("Starting encrypted connection setup");
-
         let key_exchange = KeyExchange::new();
         let public_key = key_exchange.get_public_key();
 
@@ -287,10 +284,7 @@ where
         let mut server_public_key = [0u8; 32];
         server_public_key.copy_from_slice(&server_public[..32]);
 
-        println!("Computing shared secret");
         let shared_secret = key_exchange.compute_shared_secret(&server_public_key);
-
-        println!("Setting up encryption");
         self.encryption = ClientEncryption::Encrypted(Encryptor::new(&shared_secret));
 
         Ok(())
@@ -313,13 +307,9 @@ where
 
         let data = match &self.encryption {
             ClientEncryption::None => packet.ser(),
-            ClientEncryption::Encrypted(encryptor) => {
-                println!("Encrypting packet");
-                packet.encrypted_ser(encryptor)
-            }
+            ClientEncryption::Encrypted(encryptor) => packet.encrypted_ser(encryptor),
         };
 
-        println!("Sending {} bytes", data.len());
         self.connection
             .writer_tx
             .send(ClientMessage::Data(data))
@@ -338,10 +328,7 @@ where
 
             let mut packet = match &self.encryption {
                 ClientEncryption::None => P::de(&data),
-                ClientEncryption::Encrypted(encryptor) => {
-                    println!("Decrypting packet");
-                    P::encrypted_de(&data, encryptor)
-                }
+                ClientEncryption::Encrypted(encryptor) => P::encrypted_de(&data, encryptor),
             };
 
             // Check if this is a broadcast packet
@@ -355,7 +342,6 @@ where
             }
 
             if let Some(id) = packet.session_id(None) {
-                println!("Received session ID: {}", id);
                 self.session_id = Some(id);
             }
 
@@ -409,7 +395,6 @@ where
                     keep_alive_running.store(false, Ordering::SeqCst);
                     break;
                 }
-                println!("Keepalive packet sent");
             }
         });
 

@@ -6,7 +6,7 @@ use crate::{
         client::EncryptionConfig,
         listener::{AsyncListener, AsyncListenerErrorHandler, AsyncListenerOkHandler},
     },
-    prelude::*
+    prelude::*,
 };
 use serde::{Deserialize, Serialize};
 
@@ -90,7 +90,7 @@ impl Packet for TestPacket {
             },
         }
     }
-    
+
     fn keep_alive() -> Self {
         Self {
             header: "KEEP_ALIVE".to_string(),

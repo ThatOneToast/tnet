@@ -24,13 +24,10 @@ impl Encryptor {
         key
     }
 
-
     pub fn encrypt(&self, data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
         let mut nonce = [0u8; 12];
         OsRng.fill_bytes(&mut nonce);
         let nonce = Nonce::from_slice(&nonce);
-
-        println!("Encrypting data of length: {}", data.len());
 
         let ciphertext = self
             .cipher
@@ -43,8 +40,6 @@ impl Encryptor {
     }
 
     pub fn decrypt(&self, data: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        println!("Decrypting data: {}", data);
-
         let data = BASE64
             .decode(data.as_bytes())
             .map_err(|e| format!("Base64 decode failed: {}", e))?;
