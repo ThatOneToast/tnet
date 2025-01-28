@@ -76,10 +76,7 @@ impl Packet for TestPacket {
         Self {
             header: "OK".to_string(),
             body: PacketBody {
-                username: None,
-                password: None,
-                session_id: None,
-                error_string: None,
+                ..Default::default()
             },
         }
     }
@@ -88,10 +85,8 @@ impl Packet for TestPacket {
         Self {
             header: "ERROR".to_string(),
             body: PacketBody {
-                username: None,
-                password: None,
-                session_id: None,
                 error_string: Some(error.to_string()),
+                ..Default::default()
             },
         }
     }
@@ -170,7 +165,7 @@ async fn test_encryption_integration() {
             username: Some("encrypted_user".to_string()),
             password: Some("encrypted_pass".to_string()),
             session_id: Some("session123".to_string()),
-            error_string: None,
+            ..Default::default()
         },
     };
 

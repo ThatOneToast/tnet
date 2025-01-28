@@ -1,9 +1,6 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{
-    encrypt::Encryptor,
-    errors::Error,
-};
+use crate::{encrypt::Encryptor, errors::Error};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PacketBody {
@@ -11,6 +8,21 @@ pub struct PacketBody {
     pub password: Option<String>,
     pub session_id: Option<String>,
     pub error_string: Option<String>,
+    pub is_first_keep_alive_packet: Option<bool>,
+    pub is_broadcast_packet: Option<bool>,
+}
+
+impl PacketBody {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn broadcasting() -> Self {
+        Self {
+            is_broadcast_packet: Some(true),
+            ..Default::default()
+        }
+    }
 }
 
 pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -39,7 +51,7 @@ pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
     fn header(&self) -> String;
     fn body(&self) -> PacketBody;
     fn body_mut(&mut self) -> &mut PacketBody;
-    
+
     /// IF `session_id` is some the user would like to set one.
     ///
     /// IF `session_id` is none the user would like the id.
@@ -48,4 +60,7 @@ pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
     fn ok() -> Self;
     fn error(error: Error) -> Self;
     fn keep_alive() -> Self;
+    fn is_broadcasting(&self) -> bool {
+        self.body().is_broadcast_packet.unwrap_or(false)
+    }
 }

@@ -14,6 +14,39 @@ use crate::{
 };
 
 #[derive(Clone)]
+pub struct TSockets<S>
+where
+    S: session::Session,
+{
+    pub sockets: Arc<RwLock<Vec<TSocket<S>>>>,
+}
+
+impl<S> TSockets<S>
+where
+    S: session::Session,
+{
+    pub fn new() -> Self {
+        Self {
+            sockets: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+    
+    pub async fn add(&mut self, socket: TSocket<S>) {
+        self.sockets.write().await.push(socket);
+    }
+    
+    pub async fn remove(&mut self, socket: &TSocket<S>) {
+        self.sockets.write().await.retain(|s| s.session_id != socket.session_id);
+    }
+    
+    pub async fn broadcast<P: Packet>(&self, packet: P) {
+        for socket in self.sockets.write().await.iter_mut() {
+            socket.send(packet.clone()).await.unwrap();
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct TSocket<S>
 where
     S: session::Session,

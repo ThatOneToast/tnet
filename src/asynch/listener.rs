@@ -1,7 +1,11 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use futures::future::BoxFuture;
-use tokio::{net::TcpListener, sync::RwLock, io::{AsyncReadExt, AsyncWriteExt}};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::RwLock,
+};
 
 use crate::{
     encrypt::{Encryptor, KeyExchange},
@@ -13,7 +17,7 @@ use crate::{
 use super::{
     authenticator::{AuthType, Authenticator},
     client::EncryptionConfig,
-    socket::TSocket,
+    socket::{TSocket, TSockets},
 };
 
 pub type AsyncListenerOkHandler<P, S> =
@@ -33,6 +37,7 @@ where
     authenticator: Authenticator,
     encryption: EncryptionConfig,
     sessions: Arc<RwLock<Sessions<S>>>,
+    pub keep_alive_pool: TSockets<S>,
     _packet: PhantomData<P>,
 }
 
@@ -67,6 +72,7 @@ where
             authenticator: Authenticator::new(AuthType::None),
             encryption: EncryptionConfig::default(),
             sessions,
+            keep_alive_pool: TSockets::new(),
             _packet: PhantomData,
         }
     }
@@ -141,6 +147,7 @@ where
                 .new_session(S::empty(session_id.clone()));
             tsocket.session_id = Some(session_id.clone());
 
+            self.keep_alive_pool.add(tsocket.clone()).await;
             // Send OK response with new session ID
             let mut ok = P::ok();
             ok.session_id(Some(session_id));
@@ -161,6 +168,8 @@ where
                     return Err(Error::ExpriedSessionId(id));
                 }
                 tsocket.session_id = Some(id);
+                tsocket.send(P::ok()).await?;
+                self.keep_alive_pool.add(tsocket.clone()).await;
                 return Ok(encryptor);
             }
             return Err(Error::InvalidSessionId(id));
@@ -182,6 +191,7 @@ where
                     let mut ok = P::ok();
                     ok.session_id(Some(session_id));
                     tsocket.send(ok).await?;
+                    self.keep_alive_pool.add(tsocket.clone()).await;
 
                     Ok(encryptor)
                 }
@@ -197,6 +207,15 @@ where
         }
     }
 
+    pub async fn broadcast(&self, mut packet: P) -> Result<(), Error> {
+        // Send to all connected clients in the keep_alive_pool
+        for socket in self.keep_alive_pool.sockets.write().await.iter_mut() {
+            socket.send(packet.clone()).await?;
+            
+        }
+        Ok(())
+    }
+
     pub async fn run(&mut self) {
         loop {
             match self.listener.accept().await {
@@ -206,6 +225,7 @@ where
                     let mut tsocket = TSocket::new(socket, self.sessions.clone());
                     let ok_handler = self.ok_handler.clone();
                     let error_handler = self.error_handler.clone();
+                    let mut keep_alive_pool = self.keep_alive_pool.clone();
 
                     match self.handle_authentication(&mut tsocket).await {
                         Ok(_) => {
@@ -225,6 +245,14 @@ where
                                                         e
                                                     );
                                                     break;
+                                                }
+                                                if let Some(first_ka_packet) =
+                                                    packet.body().is_first_keep_alive_packet
+                                                {
+                                                    if first_ka_packet {
+                                                        let socket_clone = tsocket.clone();
+                                                        keep_alive_pool.add(socket_clone).await;
+                                                    }
                                                 }
                                                 println!("Keepalive received and responded");
                                             } else {

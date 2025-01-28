@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use futures::future::BoxFuture;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
@@ -69,6 +70,9 @@ struct ConnectionHandler {
     reader_tx: mpsc::Sender<Vec<u8>>,
 }
 
+pub type MessageHandler<P> = Box<dyn Fn(&P) -> bool + Send + Sync>;
+pub type BroadcastHandler<P> = Box<dyn Fn(&P) -> BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct AsyncClient<P>
 where
     P: packet::Packet,
@@ -81,6 +85,7 @@ where
     keep_alive: KeepAliveConfig,
     keep_alive_running: Arc<AtomicBool>,
     response_rx: mpsc::Receiver<Vec<u8>>,
+    broadcast_handler: Option<BroadcastHandler<P>>,
     _packet: PhantomData<P>,
 }
 
@@ -166,6 +171,7 @@ where
             keep_alive: KeepAliveConfig::default(),
             keep_alive_running: Arc::new(AtomicBool::new(false)),
             response_rx: reader_rx,
+            broadcast_handler: None,
             _packet: PhantomData,
         })
     }
@@ -191,6 +197,11 @@ where
 
     pub fn with_keep_alive(mut self, config: KeepAliveConfig) -> Self {
         self.keep_alive = config;
+        self
+    }
+
+    pub fn with_broadcast_handler(mut self, handler: BroadcastHandler<P>) -> Self {
+        self.broadcast_handler = Some(handler);
         self
     }
 
@@ -286,12 +297,12 @@ where
     }
 
     pub async fn send(&mut self, mut packet: P) -> Result<(), Error> {
+        tokio::time::sleep(Duration::from_nanos(500_000)).await;
         if !self.is_connected().await {
             return Err(Error::ConnectionClosed);
         }
 
         if let Some(id) = self.session_id.to_owned() {
-            println!("Setting session ID: {}", id);
             packet.session_id(Some(id));
         } else if let Some(user) = &self.user {
             if let Some(pass) = &self.pass {
@@ -318,26 +329,38 @@ where
     }
 
     pub async fn recv(&mut self) -> Result<P, Error> {
-        let data = self
-            .response_rx
-            .recv()
-            .await
-            .ok_or_else(|| Error::ConnectionClosed)?;
+        loop {
+            let data = self
+                .response_rx
+                .recv()
+                .await
+                .ok_or_else(|| Error::ConnectionClosed)?;
 
-        let mut packet = match &self.encryption {
-            ClientEncryption::None => P::de(&data),
-            ClientEncryption::Encrypted(encryptor) => {
-                println!("Decrypting packet");
-                P::encrypted_de(&data, encryptor)
+            let mut packet = match &self.encryption {
+                ClientEncryption::None => P::de(&data),
+                ClientEncryption::Encrypted(encryptor) => {
+                    println!("Decrypting packet");
+                    P::encrypted_de(&data, encryptor)
+                }
+            };
+
+            // Check if this is a broadcast packet
+            if packet.is_broadcasting() {
+                if let Some(handler) = &self.broadcast_handler {
+                    // Call the async handler
+                    handler(&packet).await;
+                }
+                // Continue listening for non-broadcast packets
+                continue;
             }
-        };
 
-        if let Some(id) = packet.session_id(None) {
-            println!("Received session ID: {}", id);
-            self.session_id = Some(id);
+            if let Some(id) = packet.session_id(None) {
+                println!("Received session ID: {}", id);
+                self.session_id = Some(id);
+            }
+
+            return Ok(packet);
         }
-
-        Ok(packet)
     }
 
     pub async fn send_recv(&mut self, packet: P) -> Result<P, Error> {
@@ -390,6 +413,12 @@ where
             }
         });
 
+        Ok(())
+    }
+
+    pub async fn send_keepalive_packet(&mut self) -> Result<(), Error> {
+        let mut packet = P::ok();
+        packet.body_mut().is_first_keep_alive_packet = Some(true);
         Ok(())
     }
 
