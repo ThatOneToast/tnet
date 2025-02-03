@@ -23,6 +23,13 @@ impl PacketBody {
             ..Default::default()
         }
     }
+
+    pub fn with_error_string(string: &str) -> Self {
+        Self {
+            error_string: Some(string.to_string()),
+            ..Default::default()
+        }
+    }
 }
 
 pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
@@ -55,11 +62,23 @@ pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
     /// IF `session_id` is some the user would like to set one.
     ///
     /// IF `session_id` is none the user would like the id.
-    fn session_id(&mut self, session_id: Option<String>) -> Option<String>;
+    fn session_id(&mut self, session_id: Option<String>) -> Option<String> {
+        match session_id {
+            Some(id) => {
+                self.body_mut().session_id = Some(id.clone());
+                Some(id)
+            }
+            None => self.body().session_id,
+        }
+    }
 
     fn ok() -> Self;
     fn error(error: Error) -> Self;
     fn keep_alive() -> Self;
+    fn set_broadcasting(mut self) -> Self {
+        self.body_mut().is_broadcast_packet = Some(true);
+        self
+    }
     fn is_broadcasting(&self) -> bool {
         self.body().is_broadcast_packet.unwrap_or(false)
     }

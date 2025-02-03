@@ -7,10 +7,9 @@ use std::{
     time::Duration,
 };
 
-use futures::future::BoxFuture;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
+    sync::{mpsc, Mutex},
 };
 
 use crate::{
@@ -18,6 +17,8 @@ use crate::{
     errors::Error,
     packet,
 };
+
+use super::client_ext::AsyncClientRef;
 
 #[derive(Clone)]
 pub enum ClientEncryption {
@@ -30,6 +31,16 @@ pub struct EncryptionConfig {
     pub enabled: bool,
     pub key: Option<[u8; 32]>,
     pub auto_key_exchange: bool,
+}
+
+impl EncryptionConfig {
+    pub fn default_on() -> Self {
+        Self {
+            enabled: true,
+            key: None,
+            auto_key_exchange: true,
+        }
+    }
 }
 
 impl Default for EncryptionConfig {
@@ -71,7 +82,8 @@ struct ConnectionHandler {
 }
 
 pub type MessageHandler<P> = Box<dyn Fn(&P) -> bool + Send + Sync>;
-pub type BroadcastHandler<P> = Box<dyn Fn(&P) -> BoxFuture<'static, ()> + Send + Sync>;
+pub type BroadcastHandler<P> = Box<dyn Fn(&P) -> () + Send + Sync>;
+
 
 pub struct AsyncClient<P>
 where
@@ -83,9 +95,10 @@ where
     user: Option<String>,
     pass: Option<String>,
     keep_alive: KeepAliveConfig,
+    keep_alive_cold_start: Arc<Mutex<bool>>,
     keep_alive_running: Arc<AtomicBool>,
     response_rx: mpsc::Receiver<Vec<u8>>,
-    broadcast_handler: Option<BroadcastHandler<P>>,
+    broadcast_handler: Option<Arc<BroadcastHandler<P>>>,
     _packet: PhantomData<P>,
 }
 
@@ -169,6 +182,7 @@ where
             user: None,
             pass: None,
             keep_alive: KeepAliveConfig::default(),
+            keep_alive_cold_start: Arc::new(Mutex::new(true)),
             keep_alive_running: Arc::new(AtomicBool::new(false)),
             response_rx: reader_rx,
             broadcast_handler: None,
@@ -178,6 +192,12 @@ where
 
     pub fn with_credentials(mut self, user: &str, pass: &str) -> Self {
         self.user = Some(user.to_string());
+        self.pass = Some(pass.to_string());
+        self
+    }
+
+    pub fn with_root_password(mut self, pass: &str) -> Self {
+        self.user = Some("root".to_string());
         self.pass = Some(pass.to_string());
         self
     }
@@ -201,8 +221,22 @@ where
     }
 
     pub fn with_broadcast_handler(mut self, handler: BroadcastHandler<P>) -> Self {
-        self.broadcast_handler = Some(handler);
+        self.broadcast_handler = Some(Arc::new(handler));
         self
+    }
+
+    pub async fn finalize(&mut self) {
+        self.send_recv(P::ok())
+            .await
+            .expect("Unknown Error Occured");
+
+        if self.keep_alive.enabled {
+            self.start_keepalive().await.unwrap();
+        }
+    }
+    
+    pub async fn convert_to_ref(self) -> AsyncClientRef<P> {
+        AsyncClientRef::new(self)
     }
 
     pub async fn with_encryption_config(
@@ -224,15 +258,11 @@ where
 
         // After encryption setup, handle authentication response
         if let (Some(user), Some(pass)) = (&self.user, &self.pass) {
-            let mut auth_packet = P::ok(); // or create a specific auth packet type
+            let mut auth_packet = P::ok();
             auth_packet.body_mut().username = Some(user.clone());
             auth_packet.body_mut().password = Some(pass.clone());
-            self.send(auth_packet)
-                .await
-                .expect("Failed to send auth packet");
 
-            // Wait for authentication response
-            match self.recv().await {
+            match self.send_recv(auth_packet).await {
                 Ok(mut response) => {
                     if let Some(id) = response.session_id(None) {
                         self.session_id = Some(id);
@@ -334,10 +364,9 @@ where
             // Check if this is a broadcast packet
             if packet.is_broadcasting() {
                 if let Some(handler) = &self.broadcast_handler {
-                    // Call the async handler
-                    handler(&packet).await;
+                    let handler = handler.clone();
+                    handler(&packet)
                 }
-                // Continue listening for non-broadcast packets
                 continue;
             }
 
@@ -354,9 +383,9 @@ where
         self.recv().await
     }
 
-    pub async fn start_keepalive(&mut self) -> Result<(), Error>
+    async fn start_keepalive<'a>(&mut self) -> Result<(), Error>
     where
-        P: 'static,
+        P: 'a,
     {
         if !self.keep_alive.enabled || self.keep_alive_running.load(Ordering::SeqCst) {
             return Ok(());
@@ -371,6 +400,7 @@ where
         let encryption = self.encryption.clone();
         let keep_alive_running = self.keep_alive_running.clone();
         let writer_tx = self.connection.writer_tx.clone();
+        let cold_start = self.keep_alive_cold_start.clone();
         keep_alive_running.store(true, Ordering::SeqCst);
 
         tokio::spawn(async move {
@@ -379,7 +409,19 @@ where
             while keep_alive_running.load(Ordering::SeqCst) {
                 interval.tick().await;
 
-                let mut packet = P::keep_alive();
+                let mut packet = if cold_start.lock().await.to_owned() {
+                    let mut packet = P::ok();
+                    packet.body_mut().session_id = Some(session_id.clone());
+                    packet.body_mut().is_first_keep_alive_packet = Some(true);
+
+                    packet
+                } else {
+                    let mut packet = P::ok();
+                    packet.body_mut().session_id = Some(session_id.clone());
+
+                    packet
+                };
+
                 packet.session_id(Some(session_id.clone()));
 
                 let data = match &encryption {
@@ -398,12 +440,6 @@ where
             }
         });
 
-        Ok(())
-    }
-
-    pub async fn send_keepalive_packet(&mut self) -> Result<(), Error> {
-        let mut packet = P::ok();
-        packet.body_mut().is_first_keep_alive_packet = Some(true);
         Ok(())
     }
 

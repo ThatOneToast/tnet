@@ -1,7 +1,7 @@
 pub use crate::asynch::{
     authenticator::{AuthFunction, AuthType, Authenticator},
     client::{AsyncClient, ClientEncryption, EncryptionConfig},
-    listener::{AsyncListener, AsyncListenerErrorHandler, AsyncListenerOkHandler},
+    listener::{AsyncListener, PoolRef, AsyncListenerErrorHandler, AsyncListenerOkHandler},
     socket::TSocket,
 };
 
@@ -18,3 +18,4 @@ pub use std::future::Future;
 pub use std::pin::Pin;
 pub use std::sync::Arc;
 pub use tokio::net::TcpStream;
+

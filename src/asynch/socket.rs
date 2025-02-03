@@ -109,15 +109,6 @@ where
         }
     }
 
-    pub async fn session_clone(&self) -> Option<S> {
-        if let Some(id) = &self.session_id {
-            let sessions = self.sessions.read().await;
-            sessions.get_session(id).cloned()
-        } else {
-            None
-        }
-    }
-
     pub async fn send<P: Packet>(&mut self, packet: P) -> Result<(), Error> {
         let data = match &self.encryptor {
             Some(encryptor) => packet.encrypted_ser(encryptor),

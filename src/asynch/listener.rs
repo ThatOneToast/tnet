@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use futures::future::BoxFuture;
 use tokio::{
@@ -10,7 +10,7 @@ use tokio::{
 use crate::{
     encrypt::{Encryptor, KeyExchange},
     errors::Error,
-    packet,
+    packet, resources,
     session::{self, Sessions},
 };
 
@@ -20,37 +20,48 @@ use super::{
     socket::{TSocket, TSockets},
 };
 
-pub type AsyncListenerOkHandler<P, S> =
-    Arc<dyn Fn(TSocket<S>, P) -> BoxFuture<'static, ()> + Send + Sync>;
+pub type AsyncListenerOkHandler<P, S, R> =
+    Arc<dyn Fn(TSocket<S>, P, PoolRef<S>, ResourceRef<R>) -> BoxFuture<'static, ()> + Send + Sync>;
 
-pub type AsyncListenerErrorHandler<S> =
-    Arc<dyn Fn(TSocket<S>, Error) -> BoxFuture<'static, ()> + Send + Sync>;
+pub type AsyncListenerErrorHandler<S, R> = Arc<
+    dyn Fn(TSocket<S>, Error, PoolRef<S>, ResourceRef<R>) -> BoxFuture<'static, ()> + Send + Sync,
+>;
 
-pub struct AsyncListener<P, S>
+#[derive(Clone)]
+pub struct PoolRef<S: session::Session + 'static>(pub Arc<RwLock<HashMap<String, TSockets<S>>>>);
+
+#[derive(Clone)]
+pub struct ResourceRef<R: resources::Resource + 'static>(pub Arc<R>);
+
+pub struct AsyncListener<P, S, R>
 where
     P: packet::Packet + 'static,
     S: session::Session + 'static,
+    R: resources::Resource + 'static,
 {
     listener: TcpListener,
-    ok_handler: AsyncListenerOkHandler<P, S>,
-    error_handler: AsyncListenerErrorHandler<S>,
+    ok_handler: AsyncListenerOkHandler<P, S, R>,
+    error_handler: AsyncListenerErrorHandler<S, R>,
     authenticator: Authenticator,
     encryption: EncryptionConfig,
     sessions: Arc<RwLock<Sessions<S>>>,
     pub keep_alive_pool: TSockets<S>,
+    pub pools: Arc<RwLock<HashMap<String, TSockets<S>>>>,
+    resources: Arc<R>,
     _packet: PhantomData<P>,
 }
 
-impl<P, S> AsyncListener<P, S>
+impl<P, S, R> AsyncListener<P, S, R>
 where
     P: packet::Packet + 'static,
     S: session::Session + 'static,
+    R: resources::Resource + 'static,
 {
     pub async fn new(
         ip_port: (&str, u16),
         clean_interval: u64,
-        ok_handler: AsyncListenerOkHandler<P, S>,
-        error_handler: AsyncListenerErrorHandler<S>,
+        ok_handler: AsyncListenerOkHandler<P, S, R>,
+        error_handler: AsyncListenerErrorHandler<S, R>,
     ) -> Self {
         let sessions = Arc::new(RwLock::new(Sessions::new()));
 
@@ -73,6 +84,8 @@ where
             encryption: EncryptionConfig::default(),
             sessions,
             keep_alive_pool: TSockets::new(),
+            pools: Arc::new(RwLock::new(HashMap::new())),
+            resources: Arc::new(R::new()),
             _packet: PhantomData,
         }
     }
@@ -89,6 +102,33 @@ where
     pub fn with_authenticator(mut self, authenticator: Authenticator) -> Self {
         self.authenticator = authenticator;
         self
+    }
+
+    pub async fn with_pool(&self, pool_name: &str) {
+        self.pools
+            .write()
+            .await
+            .insert(pool_name.to_string(), TSockets::new());
+    }
+
+    pub async fn with_resource(mut self, resource: R) -> Self {
+        self.resources = Arc::new(resource);
+        self
+    }
+
+    pub async fn add_socket_to_pool(&mut self, pool_name: &str, socket: &TSocket<S>) {
+        let socket = socket.clone();
+        let mut pools = self.pools.write().await;
+        let pool = pools.get_mut(pool_name).expect("Unknown Pool");
+        pool.add(socket).await;
+    }
+
+    pub async fn get_pool_ref(&self) -> PoolRef<S> {
+        PoolRef(self.pools.clone())
+    }
+
+    pub async fn get_resources(&self) -> Arc<R> {
+        self.resources.clone()
     }
 
     async fn handle_encryption_handshake(
@@ -186,7 +226,6 @@ where
                     let mut ok = P::ok();
                     ok.session_id(Some(session_id));
                     tsocket.send(ok).await?;
-                    self.keep_alive_pool.add(tsocket.clone()).await;
 
                     Ok(encryptor)
                 }
@@ -202,7 +241,7 @@ where
         }
     }
 
-    pub async fn broadcast(&self, mut packet: P) -> Result<(), Error> {
+    pub async fn broadcast(&self, packet: P) -> Result<(), Error> {
         // Send to all connected clients in the keep_alive_pool
         for socket in self.keep_alive_pool.sockets.write().await.iter_mut() {
             socket.send(packet.clone()).await?;
@@ -211,70 +250,84 @@ where
     }
 
     pub async fn run(&mut self) {
+        println!("Server Started!");
         loop {
-            match self.listener.accept().await {
-                Ok((socket, addr)) => {
-                    println!("Accepted connection from {}", addr);
+            let opt = self.listener.accept().await;
 
-                    let mut tsocket = TSocket::new(socket, self.sessions.clone());
-                    let ok_handler = self.ok_handler.clone();
-                    let error_handler = self.error_handler.clone();
-                    let mut keep_alive_pool = self.keep_alive_pool.clone();
+            if let Err(e) = opt {
+                eprintln!("Failed to accept connection: {}", e);
+                break;
+            }
 
-                    match self.handle_authentication(&mut tsocket).await {
-                        Ok(_) => {
-                            tokio::spawn(async move {
-                                loop {
-                                    match tsocket.recv::<P>().await {
-                                        Ok(packet) => {
-                                            if packet.header() == P::keep_alive().header() {
-                                                // Handle keepalive
-                                                let mut response = P::keep_alive();
-                                                if let Some(id) = &tsocket.session_id {
-                                                    response.session_id(Some(id.clone()));
-                                                }
-                                                if let Err(e) = tsocket.send(response).await {
-                                                    eprintln!(
-                                                        "Failed to send keepalive response: {}",
-                                                        e
-                                                    );
-                                                    break;
-                                                }
-                                                if let Some(first_ka_packet) =
-                                                    packet.body().is_first_keep_alive_packet
-                                                {
-                                                    if first_ka_packet {
-                                                        let socket_clone = tsocket.clone();
-                                                        keep_alive_pool.add(socket_clone).await;
-                                                    }
-                                                }
-                                            } else {
-                                                // Handle regular message
-                                                ok_handler(tsocket.clone(), packet).await;
-                                                // Don't break here - continue handling messages
-                                            }
-                                        }
-                                        Err(Error::ConnectionClosed) => {
-                                            println!("Client disconnected");
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            error_handler(tsocket.clone(), e).await;
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
+            let (socket, addr) = opt.unwrap();
+
+            println!("Accepted connection from {}", addr);
+
+            let mut tsocket = TSocket::new(socket, self.sessions.clone());
+            let ok_handler = self.ok_handler.clone();
+            let error_handler = self.error_handler.clone();
+            let mut keep_alive_pool = self.keep_alive_pool.clone();
+            let pools = self.pools.clone();
+            let resources = self.resources.clone();
+
+            let auth_resp = self.handle_authentication(&mut tsocket).await;
+
+            if let Err(e) = auth_resp {
+                error_handler(
+                    tsocket,
+                    e,
+                    PoolRef(pools.clone()),
+                    ResourceRef(resources.clone()),
+                )
+                .await;
+            } else {
+                tokio::spawn(async move {
+                    loop {
+                        let resp = tsocket.recv::<P>().await;
+
+                        if let Err(e) = resp.as_ref() {
+                            if e == &Error::ConnectionClosed {
+                                println!("Client disconnected.");
+                                break;
+                            }
+                            error_handler(
+                                tsocket.clone(),
+                                e.to_owned(),
+                                PoolRef(pools.clone()),
+                                ResourceRef(resources.clone()),
+                            )
+                            .await;
                         }
-                        Err(e) => {
-                            error_handler(tsocket, e).await;
+
+                        let packet = resp.unwrap();
+
+                        if packet.header() == P::keep_alive().header() {
+                            let mut response = P::keep_alive();
+                            if let Some(id) = &tsocket.session_id {
+                                response.session_id(Some(id.clone()));
+                            }
+                            if let Err(e) = tsocket.send(response).await {
+                                eprintln!("Failed to send keepalive response: {}", e);
+                                break;
+                            }
+                            if let Some(first_ka_packet) = packet.body().is_first_keep_alive_packet
+                            {
+                                if first_ka_packet {
+                                    let socket_clone = tsocket.clone();
+                                    keep_alive_pool.add(socket_clone).await;
+                                }
+                            }
+                        } else {
+                            ok_handler(
+                                tsocket.clone(),
+                                packet,
+                                PoolRef(pools.clone()),
+                                ResourceRef(resources.clone()),
+                            )
+                            .await;
                         }
                     }
-                }
-                Err(e) => {
-                    eprintln!("Failed to accept connection: {}", e);
-                    break;
-                }
+                });
             }
         }
     }

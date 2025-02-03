@@ -4,9 +4,10 @@ use crate::{
     asynch::{
         authenticator::{AuthFunction, AuthType, Authenticator},
         client::EncryptionConfig,
-        listener::{AsyncListener, AsyncListenerErrorHandler, AsyncListenerOkHandler},
+        listener::{AsyncListener, AsyncListenerErrorHandler, AsyncListenerOkHandler, PoolRef, ResourceRef},
     },
     prelude::*,
+    resources::Resource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +100,19 @@ impl Packet for TestPacket {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TestResource {
+    resources: Vec<String>,
+}
+
+impl Resource for TestResource {
+    fn new() -> Self {
+        TestResource {
+            resources: Vec::new(),
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_key_exchange() {
     let client_exchange = KeyExchange::new();
@@ -115,13 +129,20 @@ async fn test_key_exchange() {
 
 #[tokio::test]
 async fn test_async_listener_setup() {
-    let ok_handler: AsyncListenerOkHandler<TestPacket, TestSession> =
-        Arc::new(|_socket: TSocket<TestSession>, _packet: TestPacket| Box::pin(async move {}));
+    let ok_handler: AsyncListenerOkHandler<TestPacket, TestSession, TestResource> = Arc::new(
+        |_socket: TSocket<TestSession>, _packet: TestPacket, _pools: PoolRef<TestSession>, _resources: ResourceRef<TestResource>| {
+            Box::pin(async move {})
+        },
+    );
 
-    let error_handler: AsyncListenerErrorHandler<TestSession> =
-        Arc::new(|_socket: TSocket<TestSession>, _error: Error| Box::pin(async move {}));
+    let error_handler: AsyncListenerErrorHandler<TestSession, TestResource> = Arc::new(
+        |_socket: TSocket<TestSession>, _error: Error, _pools: PoolRef<TestSession>, _resources: ResourceRef<TestResource>| {
+            Box::pin(async move {})
+        },
+    );
 
-    let listener = AsyncListener::new(("127.0.0.1", 8081), 10_800, ok_handler, error_handler).await;
+    let listener: AsyncListener<TestPacket, TestSession, TestResource> =
+        AsyncListener::new(("127.0.0.1", 8081), 10_800, ok_handler, error_handler).await;
 
     assert!(!listener.is_encryption_enabled());
 

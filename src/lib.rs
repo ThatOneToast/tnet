@@ -3,6 +3,7 @@ pub mod encrypt;
 pub mod errors;
 pub mod macros;
 pub mod packet;
+pub mod resources;
 pub mod session;
 
 pub mod prelude;
