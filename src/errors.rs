@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error, Clone, PartialEq)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum Error {
     #[error("Invalid credentials")]
     InvalidCredentials,
@@ -10,7 +10,10 @@ pub enum Error {
 
     #[error("Session id expired: {0}")]
     ExpriedSessionId(String),
-
+    
+    #[error("Expected an OK Response, did not get that")]
+    ExpectedOkPacket,
+    
     #[error("Connection closed")]
     ConnectionClosed,
 
@@ -25,4 +28,11 @@ pub enum Error {
 
     #[error("Error: {0}")]
     Other(String),
+    
+    #[error("Invalid Client Config")]
+    InvalidClientConfig,
+    
+    #[error("Invalid Client Config - There was none")]
+    UnwrappedInvalidClientConfig,
+
 }

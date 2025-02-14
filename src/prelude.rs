@@ -1,14 +1,15 @@
 pub use crate::asynch::{
     authenticator::{AuthFunction, AuthType, Authenticator},
     client::{AsyncClient, ClientEncryption, EncryptionConfig},
-    listener::{AsyncListener, PoolRef, AsyncListenerErrorHandler, AsyncListenerOkHandler},
+    listener::{AsyncListener, PoolRef, ResourceRef, AsyncListenerErrorHandler, AsyncListenerOkHandler},
     socket::TSocket,
 };
 
 pub use crate::encrypt::{Encryptor, KeyExchange};
 pub use crate::errors::Error;
-pub use crate::packet::{Packet, PacketBody};
-pub use crate::session::{Session, Sessions};
+pub use crate::packet::{Packet as ImplPacket, PacketBody};
+pub use crate::session::{Session as ImplSession, Sessions};
+pub use crate::resources::Resource as ImplResource;
 pub use crate::wrap_handler;
 
 // Common external types that are frequently used

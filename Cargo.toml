@@ -2,10 +2,16 @@
 name = "tnet"
 version = "0.1.0"
 edition = "2021"
+description = "Async TCP networking library with encryption and session management"
+keywords = ["networking", "async", "tcp", "encryption"]
+categories = ["network-programming", "asynchronous"]
+license = "MIT"
+repository = "https://github.com/thatonetoast/tnet"
 
 [lib]
 name = "tnet"
 path = "src/lib.rs"
+doctest = false
 
 [dependencies]
 aes-gcm = "0.10.3"

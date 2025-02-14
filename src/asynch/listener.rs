@@ -4,7 +4,7 @@ use futures::future::BoxFuture;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::RwLock,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crate::{
@@ -20,19 +20,125 @@ use super::{
     socket::{TSocket, TSockets},
 };
 
+/// Type alias for the success handler function in the async listener.
+///
+/// This handler is called when a packet is successfully received and validated.
+/// It processes the packet and performs any necessary business logic.
+///
+/// # Type Parameters
+///
+/// * `P` - The packet type implementing the `Packet` trait
+/// * `S` - The session type implementing the `Session` trait
+/// * `R` - The resource type implementing the `Resource` trait
 pub type AsyncListenerOkHandler<P, S, R> =
     Arc<dyn Fn(TSocket<S>, P, PoolRef<S>, ResourceRef<R>) -> BoxFuture<'static, ()> + Send + Sync>;
 
+/// Type alias for the error handler function in the async listener.
+///
+/// This handler is called when an error occurs during packet processing.
+/// It handles error conditions and performs any necessary cleanup or logging.
+///
+/// # Type Parameters
+///
+/// * `S` - The session type implementing the `Session` trait
+/// * `R` - The resource type implementing the `Resource` trait
 pub type AsyncListenerErrorHandler<S, R> = Arc<
     dyn Fn(TSocket<S>, Error, PoolRef<S>, ResourceRef<R>) -> BoxFuture<'static, ()> + Send + Sync,
 >;
 
+/// Thread-safe reference to a pool of socket connections.
+///
+/// Provides access to a shared hashmap of named socket collections, allowing
+/// multiple handlers to access and modify connection pools concurrently.
+///
+/// # Type Parameters
+///
+/// * `S` - The session type implementing the `Session` trait
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::asynch::listener::PoolRef;
+///
+/// async fn handle_pool(pool_ref: PoolRef<MySession>) {
+///     let pools = pool_ref.0.write().await;
+///     // Work with pools...
+/// }
+/// ```
 #[derive(Clone)]
-pub struct PoolRef<S: session::Session + 'static>(pub Arc<RwLock<HashMap<String, TSockets<S>>>>);
+pub struct PoolRef<S: session::Session>(pub Arc<RwLock<HashMap<String, TSockets<S>>>>);
 
+/// Thread-safe reference to shared resources.
+///
+/// Provides concurrent access to application resources that need to be shared
+/// across multiple connection handlers.
+///
+/// # Type Parameters
+///
+/// * `R` - The resource type implementing the `Resource` trait
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::asynch::listener::ResourceRef;
+///
+/// async fn use_resources(resources: ResourceRef<MyResource>) {
+///     let resource_guard = resources.read().await;
+///     // Work with resources...
+/// }
+/// ```
 #[derive(Clone)]
-pub struct ResourceRef<R: resources::Resource + 'static>(pub Arc<R>);
+pub struct ResourceRef<R: resources::Resource>(pub Arc<RwLock<R>>);
 
+impl<R: resources::Resource + 'static> ResourceRef<R> {
+    /// Creates a new `ResourceRef` wrapping the provided resource.
+    pub fn new(resource: R) -> Self {
+        Self(Arc::new(RwLock::new(resource)))
+    }
+
+    /// Obtains a read lock on the resources.
+    pub async fn read(&self) -> RwLockReadGuard<R> {
+        self.0.read().await
+    }
+
+    /// Obtains a write lock on the resources.
+    pub async fn write(&self) -> RwLockWriteGuard<R> {
+        self.0.write().await
+    }
+}
+
+/// The main server component for handling network connections and packet processing.
+///
+/// `AsyncListener` provides a robust framework for:
+/// - Accepting network connections
+/// - Managing client sessions
+/// - Handling authentication
+/// - Processing packets
+/// - Managing connection pools
+/// - Sharing resources
+///
+/// # Type Parameters
+///
+/// * `P` - The packet type implementing the `Packet` trait
+/// * `S` - The session type implementing the `Session` trait
+/// * `R` - The resource type implementing the `Resource` trait
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::asynch::listener::AsyncListener;
+///
+/// async fn create_server() {
+///     let listener = AsyncListener::new(
+///         ("127.0.0.1", 8080),
+///         30,
+///         ok_handler,
+///         error_handler
+///     ).await;
+///
+///     // Configure and run the server...
+/// }
+/// ```
 pub struct AsyncListener<P, S, R>
 where
     P: packet::Packet + 'static,
@@ -47,7 +153,7 @@ where
     sessions: Arc<RwLock<Sessions<S>>>,
     pub keep_alive_pool: TSockets<S>,
     pub pools: Arc<RwLock<HashMap<String, TSockets<S>>>>,
-    resources: Arc<R>,
+    resources: ResourceRef<R>,
     _packet: PhantomData<P>,
 }
 
@@ -57,6 +163,22 @@ where
     S: session::Session + 'static,
     R: resources::Resource + 'static,
 {
+    /// Creates a new `AsyncListener` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `ip_port` - Tuple of IP address and port to bind to
+    /// * `clean_interval` - Interval in seconds for cleaning expired sessions
+    /// * `ok_handler` - Handler for successful packet processing
+    /// * `error_handler` - Handler for error conditions
+    ///
+    /// # Returns
+    ///
+    /// * The configured `AsyncListener` instance
+    ///
+    /// # Panics
+    ///
+    /// * Panics if unable to bind to the specified IP address and port
     pub async fn new(
         ip_port: (&str, u16),
         clean_interval: u64,
@@ -85,25 +207,74 @@ where
             sessions,
             keep_alive_pool: TSockets::new(),
             pools: Arc::new(RwLock::new(HashMap::new())),
-            resources: Arc::new(R::new()),
+            resources: ResourceRef::new(R::new()),
             _packet: PhantomData,
         }
     }
 
-    pub async fn with_encryption_config(mut self, config: EncryptionConfig) -> Self {
+    /// Configures encryption settings for the listener.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Encryption configuration settings
+    ///
+    /// # Returns
+    ///
+    /// * The modified `AsyncListener` instance
+    #[must_use]
+    pub const fn with_encryption_config(mut self, config: EncryptionConfig) -> Self {
         self.encryption = config;
         self
     }
 
-    pub fn is_encryption_enabled(&self) -> bool {
+    /// Checks if encryption is enabled for this listener.
+    pub const fn is_encryption_enabled(&self) -> bool {
         self.encryption.enabled
     }
 
+    /// Configures authentication settings for the listener.
+    ///
+    /// # Arguments
+    ///
+    /// * `authenticator` - The authenticator instance to use for client authentication
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - The configured listener instance
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use tnet::{Authenticator, AuthType};
+    ///
+    /// async fn configure_auth(listener: AsyncListener<P, S, R>) {
+    ///     let auth = Authenticator::new(AuthType::UserPassword)
+    ///         .with_auth_fn(|user, pass| Box::pin(async move {
+    ///             // Authentication logic here
+    ///             Ok(())
+    ///         }));
+    ///     let listener = listener.with_authenticator(auth);
+    /// }
+    /// ```
+    #[must_use]
     pub fn with_authenticator(mut self, authenticator: Authenticator) -> Self {
         self.authenticator = authenticator;
         self
     }
 
+    /// Creates a new connection pool with the specified name.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool_name` - Name for the new connection pool
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// async fn setup_pool(listener: &AsyncListener<P, S, R>) {
+    ///     listener.with_pool("main_pool").await;
+    /// }
+    /// ```
     pub async fn with_pool(&self, pool_name: &str) {
         self.pools
             .write()
@@ -111,50 +282,116 @@ where
             .insert(pool_name.to_string(), TSockets::new());
     }
 
-    pub async fn with_resource(mut self, resource: R) -> Self {
-        self.resources = Arc::new(resource);
+    /// Configures shared resources for the listener.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - The resource instance to share across connections
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - The configured listener instance
+    #[must_use]
+    pub fn with_resource(mut self, resource: R) -> Self {
+        self.resources = ResourceRef::new(resource);
         self
     }
 
+    /// Adds a socket to a specified connection pool.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool_name` - Name of the pool to add the socket to
+    /// * `socket` - The socket to add
+    ///
+    /// # Panics
+    ///
+    /// * Panics if the specified pool doesn't exist
     pub async fn add_socket_to_pool(&mut self, pool_name: &str, socket: &TSocket<S>) {
         let socket = socket.clone();
-        let mut pools = self.pools.write().await;
-        let pool = pools.get_mut(pool_name).expect("Unknown Pool");
+        let mut pool_lock = self.pools.write().await;
+        let pool = pool_lock.get_mut(pool_name).expect("Unknown Pool");
         pool.add(socket).await;
     }
 
-    pub async fn get_pool_ref(&self) -> PoolRef<S> {
+    /// Gets a reference to the connection pools.
+    ///
+    /// # Returns
+    ///
+    /// * `PoolRef<S>` - Reference to the connection pools
+    pub fn get_pool_ref(&self) -> PoolRef<S> {
         PoolRef(self.pools.clone())
     }
 
-    pub async fn get_resources(&self) -> Arc<R> {
+    /// Gets a reference to the shared resources.
+    ///
+    /// # Returns
+    ///
+    /// * `ResourceRef<R>` - Reference to the shared resources
+    pub fn get_resources(&self) -> ResourceRef<R> {
         self.resources.clone()
     }
 
-    async fn handle_encryption_handshake(
-        &self,
-        socket: &mut TSocket<S>,
-    ) -> std::io::Result<Encryptor> {
-        let mut client_public = [0u8; 32];
-        {
-            let mut sock = socket.socket.lock().await;
-            sock.read_exact(&mut client_public).await?;
+    /// Handles the encryption handshake with a client.
+    ///
+    /// Performs key exchange and establishes encrypted communication.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - The client socket
+    ///
+    /// # Returns
+    ///
+    /// * `std::io::Result<Encryptor>` - The configured encryptor or an error
+    async fn handle_encryption_handshake(&self, socket: &TSocket<S>) -> std::io::Result<Encryptor> {
+        let mut sock = socket.socket.lock().await;
+
+        // Read length prefix
+        let mut length_buf = [0u8; 4];
+        sock.read_exact(&mut length_buf).await?;
+        let length = u32::from_be_bytes(length_buf) as usize;
+
+        if length != 32 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid client public key length",
+            ));
         }
+
+        // Read client's public key
+        let mut client_public_key = [0u8; 32];
+        sock.read_exact(&mut client_public_key).await?;
 
         let key_exchange = KeyExchange::new();
         let server_public = key_exchange.get_public_key();
 
-        {
-            let mut sock = socket.socket.lock().await;
-            sock.write_all(&server_public).await?;
-            sock.flush().await?;
-        }
+        // Send length-prefixed public key
+        let mut response = Vec::new();
+        response.extend_from_slice(&(server_public.len() as u32).to_be_bytes());
+        response.extend_from_slice(&server_public);
 
-        let shared_secret = key_exchange.compute_shared_secret(&client_public);
+        sock.write_all(&response).await?;
+        sock.flush().await?;
+        drop(sock);
 
+        let shared_secret = key_exchange.compute_shared_secret(&client_public_key);
         Ok(Encryptor::new(&shared_secret))
     }
 
+    /// Handles the authentication process for a client connection.
+    ///
+    /// Processes various authentication methods including:
+    /// - Session ID authentication
+    /// - Username/password authentication
+    /// - No authentication (if configured)
+    ///
+    /// # Arguments
+    ///
+    /// * `tsocket` - The client socket
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Option<Encryptor>, Error>` - The encryption configuration or an error
     async fn handle_authentication(
         &mut self,
         tsocket: &mut TSocket<S>,
@@ -197,8 +434,7 @@ where
 
         // Case 3a: Session ID Authentication
         if let Some(id) = body.session_id {
-            let sessions = self.sessions.read().await;
-            if let Some(session) = sessions.get_session(&id) {
+            if let Some(session) = self.sessions.read().await.get_session(&id) {
                 if session.is_expired() {
                     return Err(Error::ExpriedSessionId(id));
                 }
@@ -241,27 +477,69 @@ where
         }
     }
 
+    /// Broadcasts a packet to all connected clients.
+    ///
+    /// # Arguments
+    ///
+    /// * `packet` - The packet to broadcast
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), Error>` - Success or failure of the broadcast operation
+    ///
+    /// # Errors
+    ///
+    /// * Returns error if sending to any client fails
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// async fn broadcast_message(listener: &AsyncListener<P, S, R>, packet: P) {
+    ///     listener.broadcast(packet).await.expect("Broadcast failed");
+    /// }
+    /// ```
     pub async fn broadcast(&self, packet: P) -> Result<(), Error> {
-        // Send to all connected clients in the keep_alive_pool
-        for socket in self.keep_alive_pool.sockets.write().await.iter_mut() {
+        let pool = self.keep_alive_pool.clone().sockets;
+        for socket in pool.write().await.iter_mut() {
             socket.send(packet.clone()).await?;
         }
         Ok(())
     }
 
+    /// Starts the listener and begins accepting connections.
+    ///
+    /// This is the main event loop that:
+    /// 1. Accepts incoming connections
+    /// 2. Handles authentication
+    /// 3. Processes packets
+    /// 4. Manages connection lifecycle
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// async fn start_server(mut listener: AsyncListener<P, S, R>) {
+    ///     println!("Starting server...");
+    ///     listener.run().await;
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// * Panics if accepting a connection fails unexpectedly
     pub async fn run(&mut self) {
         println!("Server Started!");
         loop {
-            let opt = self.listener.accept().await;
+            let opt = match self.listener.accept().await {
+                Ok(opt) => opt,
+                Err(e) => {
+                    eprintln!("Failed to accept connection: {e}");
+                    break;
+                }
+            };
 
-            if let Err(e) = opt {
-                eprintln!("Failed to accept connection: {}", e);
-                break;
-            }
+            let (socket, addr) = opt;
 
-            let (socket, addr) = opt.unwrap();
-
-            println!("Accepted connection from {}", addr);
+            println!("Accepted connection from {addr}");
 
             let mut tsocket = TSocket::new(socket, self.sessions.clone());
             let ok_handler = self.ok_handler.clone();
@@ -273,13 +551,7 @@ where
             let auth_resp = self.handle_authentication(&mut tsocket).await;
 
             if let Err(e) = auth_resp {
-                error_handler(
-                    tsocket,
-                    e,
-                    PoolRef(pools.clone()),
-                    ResourceRef(resources.clone()),
-                )
-                .await;
+                error_handler(tsocket, e, PoolRef(pools.clone()), resources.clone()).await;
             } else {
                 tokio::spawn(async move {
                     loop {
@@ -294,7 +566,7 @@ where
                                 tsocket.clone(),
                                 e.to_owned(),
                                 PoolRef(pools.clone()),
-                                ResourceRef(resources.clone()),
+                                resources.clone(),
                             )
                             .await;
                         }
@@ -307,7 +579,7 @@ where
                                 response.session_id(Some(id.clone()));
                             }
                             if let Err(e) = tsocket.send(response).await {
-                                eprintln!("Failed to send keepalive response: {}", e);
+                                eprintln!("Failed to send keepalive response: {e}");
                                 break;
                             }
                             if let Some(first_ka_packet) = packet.body().is_first_keep_alive_packet
@@ -322,7 +594,7 @@ where
                                 tsocket.clone(),
                                 packet,
                                 PoolRef(pools.clone()),
-                                ResourceRef(resources.clone()),
+                                resources.clone(),
                             )
                             .await;
                         }

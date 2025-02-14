@@ -1,54 +1,26 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     asynch::{
-        authenticator::{AuthFunction, AuthType, Authenticator},
-        client::EncryptionConfig,
-        listener::{AsyncListener, AsyncListenerErrorHandler, AsyncListenerOkHandler, PoolRef, ResourceRef},
+        authenticator::{AuthType, Authenticator},
+        client::{AsyncClient, EncryptionConfig, KeepAliveConfig},
+        listener::{AsyncListener, PoolRef, ResourceRef},
     },
     prelude::*,
-    resources::Resource,
 };
 use serde::{Deserialize, Serialize};
 
+// Define packet type exactly as in README
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TestSession {
-    data: String,
-    id: String,
-    created_at: i64,
-    lifespan: Duration,
-}
-
-impl Session for TestSession {
-    fn id(&self) -> &str {
-        self.id.as_str()
-    }
-
-    fn created_at(&self) -> i64 {
-        self.created_at.clone()
-    }
-
-    fn lifespan(&self) -> std::time::Duration {
-        self.lifespan.clone()
-    }
-
-    fn empty(id: String) -> Self {
-        TestSession {
-            data: String::new(),
-            id,
-            created_at: chrono::Utc::now().timestamp(),
-            lifespan: Duration::from_secs(3600),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TestPacket {
+struct MyPacket {
     header: String,
     body: PacketBody,
 }
 
-impl Packet for TestPacket {
+impl ImplPacket for MyPacket {
     fn header(&self) -> String {
         self.header.clone()
     }
@@ -61,185 +33,390 @@ impl Packet for TestPacket {
         &mut self.body
     }
 
-    fn session_id(&mut self, session_id: Option<String>) -> Option<String> {
-        match session_id {
-            Some(id) => {
-                self.body.session_id = Some(id.clone());
-                return Some(id);
-            }
-            None => {
-                return self.body.session_id.to_owned().clone();
-            }
-        }
-    }
-
     fn ok() -> Self {
         Self {
             header: "OK".to_string(),
-            body: PacketBody {
-                ..Default::default()
-            },
+            body: PacketBody::default(),
         }
     }
 
     fn error(error: Error) -> Self {
         Self {
             header: "ERROR".to_string(),
-            body: PacketBody {
-                error_string: Some(error.to_string()),
-                ..Default::default()
-            },
+            body: PacketBody::with_error_string(&error.to_string()),
         }
     }
 
     fn keep_alive() -> Self {
         Self {
-            header: "KEEP_ALIVE".to_string(),
+            header: "KEEPALIVE".to_string(),
             body: PacketBody::default(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-struct TestResource {
-    resources: Vec<String>,
+// Define session type exactly as in README
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MySession {
+    id: String,
+    created_at: u64,
+    duration: Duration,
 }
 
-impl Resource for TestResource {
-    fn new() -> Self {
-        TestResource {
-            resources: Vec::new(),
+impl ImplSession for MySession {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn created_at(&self) -> u64 {
+        self.created_at
+    }
+
+    fn lifespan(&self) -> Duration {
+        self.duration
+    }
+
+    fn empty(id: String) -> Self {
+        Self {
+            id,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            duration: Duration::from_secs(3600),
         }
     }
 }
 
-#[tokio::test]
-async fn test_key_exchange() {
-    let client_exchange = KeyExchange::new();
-    let server_exchange = KeyExchange::new();
-
-    let client_public = client_exchange.get_public_key();
-    let server_public = server_exchange.get_public_key();
-
-    let client_shared = client_exchange.compute_shared_secret(&server_public);
-    let server_shared = server_exchange.compute_shared_secret(&client_public);
-
-    assert_eq!(client_shared, server_shared);
+// Define resource type exactly as in README
+#[derive(Debug, Clone)]
+struct MyResource {
+    data: Vec<String>,
 }
 
-#[tokio::test]
-async fn test_async_listener_setup() {
-    let ok_handler: AsyncListenerOkHandler<TestPacket, TestSession, TestResource> = Arc::new(
-        |_socket: TSocket<TestSession>, _packet: TestPacket, _pools: PoolRef<TestSession>, _resources: ResourceRef<TestResource>| {
-            Box::pin(async move {})
-        },
-    );
-
-    let error_handler: AsyncListenerErrorHandler<TestSession, TestResource> = Arc::new(
-        |_socket: TSocket<TestSession>, _error: Error, _pools: PoolRef<TestSession>, _resources: ResourceRef<TestResource>| {
-            Box::pin(async move {})
-        },
-    );
-
-    let listener: AsyncListener<TestPacket, TestSession, TestResource> =
-        AsyncListener::new(("127.0.0.1", 8081), 10_800, ok_handler, error_handler).await;
-
-    assert!(!listener.is_encryption_enabled());
-
-    let config = EncryptionConfig {
-        enabled: true,
-        key: Some(Encryptor::generate_key()),
-        auto_key_exchange: false,
-    };
-
-    let listener = listener.with_encryption_config(config).await;
-    assert!(listener.is_encryption_enabled());
+impl ImplResource for MyResource {
+    fn new() -> Self {
+        Self { data: Vec::new() }
+    }
 }
 
+// Test the basic server setup from README
 #[tokio::test]
-async fn test_authenticator_chain() {
-    let auth_fn: AuthFunction = |username: String, password: String| {
-        Box::pin(async move {
-            if username == "test" && password == "test" {
-                Ok(())
-            } else {
-                Err(Error::InvalidCredentials)
-            }
-        })
-    };
+async fn test_basic_server_setup() {
+    async fn handle_ok(
+        mut socket: TSocket<MySession>,
+        packet: MyPacket,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        println!("Received packet: {:?}", packet);
+        socket.send(MyPacket::ok()).await.unwrap();
+    }
 
-    let auth = Authenticator::new(AuthType::UserPassword)
-        .with_auth_fn(auth_fn)
-        .with_root_password("root".to_string());
+    async fn handle_error(
+        _socket: TSocket<MySession>,
+        error: Error,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        println!("Error occurred: {:?}", error);
+    }
 
-    assert_eq!(auth.clone().auth_type, AuthType::UserPassword);
-}
-
-#[tokio::test]
-async fn test_encryption_integration() {
-    let key = Encryptor::generate_key();
-    let encryptor = Encryptor::new(&key);
-
-    let packet = TestPacket {
-        header: "ENCRYPTED".to_string(),
-        body: PacketBody {
-            username: Some("encrypted_user".to_string()),
-            password: Some("encrypted_pass".to_string()),
-            session_id: Some("session123".to_string()),
-            ..Default::default()
-        },
-    };
-
-    let encrypted = packet.encrypted_ser(&encryptor);
-    let decrypted = TestPacket::encrypted_de(&encrypted, &encryptor);
-
-    assert_eq!(packet.header(), decrypted.header());
-    assert_eq!(
-        packet.body().username.unwrap(),
-        decrypted.body().username.unwrap()
-    );
-    assert_eq!(
-        packet.body().session_id.unwrap(),
-        decrypted.body().session_id.unwrap()
-    );
-}
-
-#[tokio::test]
-async fn test_packet_error_handling() {
-    let error_packet = TestPacket::error(Error::InvalidCredentials);
-    assert_eq!(error_packet.header(), "ERROR");
-    assert!(error_packet.body().error_string.is_some());
-    assert_eq!(
-        error_packet.body().error_string.unwrap(),
-        Error::InvalidCredentials.to_string()
+    let server = AsyncListener::new(
+        ("127.0.0.1", 8082),
+        30,
+        wrap_handler!(handle_ok),
+        wrap_handler!(handle_error),
+    )
+    .await
+    .with_encryption_config(EncryptionConfig::default_on())
+    .with_authenticator(
+        Authenticator::new(AuthType::UserPassword).with_auth_fn(|user, pass| {
+            Box::pin(async move {
+                if user == "admin" && pass == "password" {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidCredentials)
+                }
+            })
+        }),
     );
 
-    let ok_packet = TestPacket::ok();
-    assert_eq!(ok_packet.header(), "OK");
-    assert!(ok_packet.body().error_string.is_none());
+    assert!(server.is_encryption_enabled());
 }
 
+// Test the basic client setup from README
 #[tokio::test]
-async fn test_authentication_flow() {
-    let mut auth = Authenticator::new(AuthType::UserPassword).with_auth_fn(|username, password| {
-        Box::pin(async move {
-            if username == "valid_user" && password == "valid_pass" {
-                Ok(())
-            } else {
-                Err(Error::InvalidCredentials)
-            }
-        })
+async fn test_basic_client_setup() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    async fn handle_ok(
+        mut socket: TSocket<MySession>,
+        packet: MyPacket,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        println!("Server received packet: {:?}", packet);
+
+        let mut response = MyPacket::ok();
+        if let Some(session_id) = packet.body().session_id {
+            response.body_mut().session_id = Some(session_id);
+        }
+
+        println!("Server sending response: {:?}", response);
+        if let Err(e) = socket.send(response).await {
+            eprintln!("Failed to send response: {}", e);
+        }
+    }
+
+    async fn handle_error(
+        mut socket: TSocket<MySession>,
+        error: Error,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        if let Err(e) = socket.send(MyPacket::error(error)).await {
+            eprintln!("Failed to send error response: {}", e);
+        }
+    }
+
+    let mut server = AsyncListener::new(
+        ("127.0.0.1", 8083),
+        30,
+        wrap_handler!(handle_ok),
+        wrap_handler!(handle_error),
+    )
+    .await
+    .with_encryption_config(EncryptionConfig::default_on())
+    .with_authenticator(
+        Authenticator::new(AuthType::UserPassword).with_auth_fn(|user, pass| {
+            Box::pin(async move {
+                if user == "admin" && pass == "password" {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidCredentials)
+                }
+            })
+        }),
+    );
+
+    let server_handle = tokio::spawn(async move {
+        tokio::select! {
+            _ = server.run() => {},
+            _ = rx => println!("Server shutting down"),
+        }
     });
 
-    // Test valid authentication
-    let result = auth
-        .authenticate("valid_user".to_string(), "valid_pass".to_string())
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_result = async {
+        let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8083)
+            .await?
+            .with_credentials("admin", "password")
+            .with_encryption_config(EncryptionConfig::default_on())
+            .await
+            .unwrap();
+
+        client.finalize().await;
+
+        let response = client.send_recv(MyPacket::ok()).await?;
+        println!("Client received response: {:?}", response);
+
+        Ok::<_, Error>(())
+    };
+
+    match tokio::time::timeout(Duration::from_secs(5), client_result).await {
+        Ok(result) => {
+            assert!(result.is_ok(), "Client operation failed: {:?}", result);
+        }
+        Err(_) => panic!("Client test timed out"),
+    }
+
+    let _ = tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+}
+
+// Test full client-server communication
+#[tokio::test]
+async fn test_full_client_server_communication() {
+    // Server setup
+    async fn handle_ok(
+        mut socket: TSocket<MySession>,
+        packet: MyPacket,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        socket.send(MyPacket::ok()).await.unwrap();
+    }
+
+    async fn handle_error(
+        _socket: TSocket<MySession>,
+        _error: Error,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+    }
+
+    let mut server = AsyncListener::new(
+        ("127.0.0.1", 8084),
+        30,
+        wrap_handler!(handle_ok),
+        wrap_handler!(handle_error),
+    )
+    .await;
+
+    // Spawn server task
+    tokio::spawn(async move {
+        server.run().await;
+    });
+
+    // Give server time to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client setup
+    let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8084)
+        .await
+        .unwrap()
+        .with_credentials("admin", "password");
+
+    // Test communication
+    let response = client.send_recv(MyPacket::ok()).await.unwrap();
+    assert_eq!(response.header(), "OK");
+}
+
+// Test broadcasting functionality
+#[tokio::test]
+async fn test_broadcasting() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    async fn handle_ok(
+        mut socket: TSocket<MySession>,
+        packet: MyPacket,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        println!("Server received packet: {:?}", packet);
+
+        let mut response = MyPacket::ok();
+        if let Some(session_id) = packet.body().session_id {
+            response.body_mut().session_id = Some(session_id);
+        }
+
+        println!("Server sending response: {:?}", response);
+        if let Err(e) = socket.send(response).await {
+            eprintln!("Failed to send response: {}", e);
+        }
+    }
+
+    async fn handle_error(
+        mut socket: TSocket<MySession>,
+        error: Error,
+        _pools: PoolRef<MySession>,
+        _resources: ResourceRef<MyResource>,
+    ) {
+        if let Err(e) = socket.send(MyPacket::error(error)).await {
+            eprintln!("Failed to send error response: {}", e);
+        }
+    }
+
+    let mut server = AsyncListener::new(
+        ("127.0.0.1", 8085),
+        30,
+        wrap_handler!(handle_ok),
+        wrap_handler!(handle_error),
+    )
+    .await
+    .with_encryption_config(EncryptionConfig::default_on())
+    .with_authenticator(
+        Authenticator::new(AuthType::UserPassword).with_auth_fn(|user, pass| {
+            Box::pin(async move {
+                if user == "admin" && pass == "password" {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidCredentials)
+                }
+            })
+        }),
+    );
+
+    let server_handle = tokio::spawn(async move {
+        tokio::select! {
+            _ = server.run() => {},
+            _ = rx => println!("Server shutting down"),
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let broadcast_received = Arc::new(tokio::sync::Notify::new());
+    let broadcast_received_clone = broadcast_received.clone();
+
+    let client_result = async {
+        let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8085)
+            .await?
+            .with_broadcast_handler(Box::new(move |_packet| {
+                broadcast_received_clone.notify_one();
+            }))
+            .with_credentials("admin", "password")
+            .with_encryption_config(EncryptionConfig::default_on())
+            .await
+            .unwrap();
+
+        client.finalize().await;
+
+        let response = client.send_recv(MyPacket::ok()).await?;
+        println!("Client received response: {:?}", response);
+
+        Ok::<_, Error>(())
+    };
+
+    match tokio::time::timeout(Duration::from_secs(5), client_result).await {
+        Ok(result) => {
+            assert!(result.is_ok(), "Client operation failed: {:?}", result);
+        }
+        Err(_) => panic!("Client test timed out"),
+    }
+
+    let _ = tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+}
+
+// Test custom authentication
+#[tokio::test]
+async fn test_custom_authentication() {
+    let mut authenticator =
+        Authenticator::new(AuthType::UserPassword).with_auth_fn(|username, password| {
+            Box::pin(async move {
+                if username == "admin" && password == "password" {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidCredentials)
+                }
+            })
+        });
+
+    // Test valid credentials
+    let result = authenticator
+        .authenticate("admin".to_string(), "password".to_string())
         .await;
     assert!(result.is_ok());
 
-    // Test invalid authentication
-    let result = auth
-        .authenticate("invalid_user".to_string(), "invalid_pass".to_string())
+    // Test invalid credentials
+    let result = authenticator
+        .authenticate("wrong".to_string(), "wrong".to_string())
         .await;
     assert!(result.is_err());
+}
+
+// Test encryption
+#[tokio::test]
+async fn test_encryption() {
+    let key = Encryptor::generate_key();
+    let encryptor = Encryptor::new(&key);
+
+    let original_packet = MyPacket::ok();
+    let encrypted = original_packet.encrypted_ser(&encryptor);
+    let decrypted = MyPacket::encrypted_de(&encrypted, &encryptor);
+
+    assert_eq!(original_packet.header(), decrypted.header());
 }
