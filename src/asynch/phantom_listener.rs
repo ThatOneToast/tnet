@@ -109,77 +109,83 @@ async fn ok(
     _resources: ResourceRef<PhantomResources>,
 ) {
     if packet.header.as_str() == "relay" {
-        let underlying_packet = &packet.sent_packet;
-        if underlying_packet.is_none() {
-            socket
-                .send(PhantomPacket::error(Error::Other(
-                    "No packet to relay".to_string(),
-                )))
-                .await
-                .unwrap();
-            return;
-        }
+        let sent_packet = match &packet.sent_packet {
+            Some(p) => p,
+            None => {
+                socket
+                    .send(PhantomPacket::error(Error::Other(
+                        "No packet to relay".to_string(),
+                    )))
+                    .await
+                    .expect("Failed to send error packet for SentPacket");
+                return;
+            }
+        };
 
-        let underlying_packet = underlying_packet.as_ref().unwrap();
+        let client_config = match &packet.client_config {
+            Some(config) => config,
+            None => {
+                socket
+                    .send(PhantomPacket::error(Error::InvalidClientConfig))
+                    .await
+                    .expect("Failed to send error packet for ClientConfig");
+                return;
+            }
+        };
 
-        if let Some(client_config) = &packet.client_config {
-            let addr = socket.addr().await;
-            println!(
-                "{}",
-                format_args!(
-                    "Recieved a relay request from {:?} -> {}:{}",
-                    addr, client_config.server_addr, client_config.server_port
-                )
-            );
+        println!(
+            "Received a relay request from {:?} -> {}:{}",
+            socket.addr().await,
+            client_config.server_addr,
+            client_config.server_port
+        );
 
-            let mut pf_client = AsyncPhantomClient::from_client_config(client_config)
-                .await
-                .unwrap();
+        match AsyncPhantomClient::from_client_config(client_config).await {
+            Ok(mut phantom_client) => {
+                phantom_client.finalize().await;
+                println!("Phantom client connection established");
 
-            pf_client.finalize().await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
 
-            match pf_client
-                .send_recv_raw(underlying_packet.as_bytes().to_vec())
-                .await
-            {
-                Ok(response_data) => {
-                    println!(
-                        "Received response from destination server: {:?}",
-                        String::from_utf8_lossy(&response_data)
-                    );
+                match phantom_client
+                    .send_recv_raw(sent_packet.as_bytes().to_vec())
+                    .await
+                {
+                    Ok(response_data) => {
+                        let response_str = String::from_utf8(response_data)
+                            .map_err(|e| eprintln!("Failed to convert response to string ::: {e}"))
+                            .unwrap();
+                        println!("Received response from destination: {}", response_str);
 
-                    let mut response_packet = PhantomPacket::response();
-                    response_packet.recv_packet =
-                        Some(String::from_utf8_lossy(&response_data).to_string());
+                        let mut response_packet = PhantomPacket::response();
+                        response_packet.recv_packet = Some(response_str);
 
-                    println!("Sending response back to original client...");
-                    if let Err(e) = socket.send(response_packet).await {
-                        eprintln!("Failed to send response back to client: {e}");
+                        if let Err(e) = socket.send(response_packet).await {
+                            eprintln!("Failed to send response back to client: {}", e);
+                        }
                     }
-                    println!("Response sent to original client");
-                }
-                Err(e) => {
-                    eprintln!("Error receiving response from destination: {e}");
-                    if let Err(send_err) = socket.send(PhantomPacket::error(e)).await {
-                        eprintln!("Failed to send error response: {send_err}");
+                    Err(e) => {
+                        eprintln!("Error receiving response from destination: {}", e);
+                        let _ = socket.send(PhantomPacket::error(e)).await;
                     }
                 }
             }
-        } else {
-            socket
-                .send(PhantomPacket::error(Error::InvalidClientConfig))
-                .await
-                .unwrap();
+            Err(e) => {
+                eprintln!("Failed to create phantom client: {}", e);
+                let _ = socket.send(PhantomPacket::error(e)).await;
+            }
         }
     }
 }
 
 async fn bad(
-    _socket: TSocket<PhantomSession>,
-    _error: Error,
+    mut socket: TSocket<PhantomSession>,
+    error: Error,
     _pools: PoolRef<PhantomSession>,
     _resources: ResourceRef<PhantomResources>,
 ) {
+    eprintln!("Error in phantom listener: {error}");
+    let _ = socket.send(PhantomPacket::error(error)).await;
 }
 
 impl PhantomListener {

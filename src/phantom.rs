@@ -6,6 +6,10 @@ use crate::{
     prelude::EncryptionConfig,
 };
 
+/// A const allowable struct for holding a ClientConfig for PhantomClients.
+///
+/// PhantomConf can be used on a `ClientConfig::from(PhantomConf)` to generate a ClientConfig
+/// The header is ignored during the transfer process, as ClientConfig just stores endpoint information.
 #[derive(Debug, Clone)]
 pub struct PhantomConf<'a> {
     pub header: &'a str,
@@ -16,6 +20,19 @@ pub struct PhantomConf<'a> {
     pub enc_conf: EncryptionConfig,
 }
 
+impl<'a> From<&'a ClientConfig> for PhantomConf<'a> {
+    fn from(value: &'a ClientConfig) -> Self {
+        Self {
+            header: "relay",
+            enc_conf: value.encryption_config.clone(),
+            username: value.user.as_deref(),
+            password: value.pass.as_deref(),
+            server_addr: value.server_addr.as_str(),
+            server_port: value.server_port,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     pub encryption_config: EncryptionConfig,
@@ -23,6 +40,18 @@ pub struct ClientConfig {
     pub server_port: u16,
     pub user: Option<String>,
     pub pass: Option<String>,
+}
+
+impl From<&PhantomConf<'_>> for ClientConfig {
+    fn from(conf: &PhantomConf<'_>) -> Self {
+        Self {
+            encryption_config: conf.enc_conf.clone(),
+            server_addr: conf.server_addr.to_string(),
+            server_port: conf.server_port,
+            user: conf.username.map(|v| v.to_string()),
+            pass: conf.password.map(|v| v.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,26 +65,17 @@ pub struct PhantomPacket {
 
 impl PhantomPacket {
     /// Produces a `PhantomPacket` from the given configuration and underlying packet.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// This function will panic if the underlying packet cannot be serialized to JSON.
-    pub fn produce_from_conf<A: Serialize>(
-        conf: &PhantomConf,
-        underlying_packet: A,
-    ) -> Self {
+    pub fn produce_from_conf<A: Serialize>(conf: &PhantomConf, underlying_packet: A) -> Self {
         let up_ser = serde_json::to_string(&underlying_packet)
             .expect("Failed to produce PhantomPacket from UnderlyingPacket, cannot be converted to string json.");
 
         Self {
             header: conf.header.to_string(),
-            client_config: Some(ClientConfig {
-                encryption_config: conf.enc_conf.clone(),
-                user: conf.username.map(ToString::to_string),
-                pass: conf.password.map(ToString::to_string),
-                server_port: conf.server_port,
-                server_addr: conf.server_addr.to_string(),
-            }),
+            client_config: Some(ClientConfig::from(conf)),
             sent_packet: Some(up_ser),
             ..Default::default()
         }

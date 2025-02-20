@@ -68,6 +68,16 @@ pub type AsyncListenerErrorHandler<S, R> = Arc<
 #[derive(Clone)]
 pub struct PoolRef<S: session::Session>(pub Arc<RwLock<HashMap<String, TSockets<S>>>>);
 
+impl<S: session::Session> PoolRef<S> {
+    pub async fn write(&mut self) -> RwLockWriteGuard<'_, HashMap<String, TSockets<S>>> {
+        self.0.write().await
+    }
+
+    pub async fn read(&self) -> RwLockReadGuard<'_, HashMap<String, TSockets<S>>> {
+        self.0.read().await
+    }
+}
+
 /// Thread-safe reference to shared resources.
 ///
 /// Provides concurrent access to application resources that need to be shared
@@ -309,8 +319,9 @@ where
     /// * Panics if the specified pool doesn't exist
     pub async fn add_socket_to_pool(&mut self, pool_name: &str, socket: &TSocket<S>) {
         let socket = socket.clone();
-        let mut pool_lock = self.pools.write().await;
-        let pool = pool_lock.get_mut(pool_name).expect("Unknown Pool");
+        let mut pools = self.pools.clone();
+        let mut pool = pools.write().await;
+        let pool = pool.get_mut(pool_name).expect("Unknown Pool");
         pool.add(socket).await;
     }
 

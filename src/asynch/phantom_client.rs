@@ -72,7 +72,7 @@ impl AsyncPhantomClient {
     /// * `Result<Self, Error>` - The initialized client or an error
     ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - Connection to server fails
     /// - Channel creation fails
@@ -214,7 +214,7 @@ impl AsyncPhantomClient {
     /// # Returns
     ///
     /// * `Self` - The modified client instance
-    #[must_use] 
+    #[must_use]
     pub fn with_root_password(mut self, pass: &str) -> Self {
         self.user = Some("root".to_string());
         self.pass = Some(pass.to_string());
@@ -568,7 +568,7 @@ impl AsyncPhantomClient {
     ///
     /// May panic if:
     /// - Decryption fails
-    /// - UTF-8 conversion fails 
+    /// - UTF-8 conversion fails
     pub async fn recv_raw(&mut self) -> Result<Vec<u8>, Error> {
         tokio::time::sleep(Duration::from_nanos(250_000)).await;
 

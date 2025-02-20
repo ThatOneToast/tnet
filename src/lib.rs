@@ -5,20 +5,16 @@
 #![warn(clippy::correctness)]
 #![warn(clippy::cargo)]
 
-
-
-
 //! # `TNet`
-//! 
+//!
 //! A networking library providing async TCP client/server functionality with:
 //! - Secure connections with encryption
-//! - Session management 
+//! - Session management
 //! - Authentication
 //! - Keep-alive mechanisms
 //! - Broadcast capabilities
-//! 
-//! 
-
+//!
+//!
 
 pub mod asynch;
 pub mod encrypt;
@@ -33,4 +29,5 @@ pub mod prelude;
 
 #[cfg(test)]
 mod tests;
-
+#[cfg(test)]
+mod tests2;

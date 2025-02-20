@@ -6,7 +6,7 @@ use std::{
 use crate::{
     asynch::{
         authenticator::{AuthType, Authenticator},
-        client::{AsyncClient, EncryptionConfig, KeepAliveConfig},
+        client::{AsyncClient, EncryptionConfig},
         listener::{AsyncListener, PoolRef, ResourceRef},
     },
     prelude::*,
@@ -91,12 +91,12 @@ impl ImplSession for MySession {
 // Define resource type exactly as in README
 #[derive(Debug, Clone)]
 struct MyResource {
-    data: Vec<String>,
+    _data: Vec<String>,
 }
 
 impl ImplResource for MyResource {
     fn new() -> Self {
-        Self { data: Vec::new() }
+        Self { _data: Vec::new() }
     }
 }
 
@@ -242,7 +242,7 @@ async fn test_full_client_server_communication() {
     // Server setup
     async fn handle_ok(
         mut socket: TSocket<MySession>,
-        packet: MyPacket,
+        _packet: MyPacket,
         _pools: PoolRef<MySession>,
         _resources: ResourceRef<MyResource>,
     ) {

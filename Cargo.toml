@@ -14,14 +14,14 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-aes-gcm = "0.10.3"
-base64 = "0.22.1"
-chrono = "0.4.39"
-futures = "0.3.31"
-rand = "0.8.5"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.134"
-thiserror = "2.0.11"
-tokio = { version = "1.42.0", features = ["full"] }
-uuid = { version = "1.12.1", features = ["v4"] }
-x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+aes-gcm = "=0.10.3"
+base64 = "=0.22.1"
+chrono = "=0.4.39"
+futures = "=0.3.31"
+rand = "=0.8.5"
+serde = { version = "=1", features = ["derive"] }
+serde_json = "=1"
+thiserror = "=2.0.11"
+tokio = { version = "=1", features = ["full"] }
+uuid = { version = "=1", features = ["v4"] }
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }

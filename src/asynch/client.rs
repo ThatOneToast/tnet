@@ -414,7 +414,12 @@ where
     ///
     /// Panics if there is an error sending the phantom packet or starting keepalive.
     pub async fn finalize_phantom(&mut self) {
-        self.send_phantom_packet(PhantomPacket::ok()).await.unwrap();
+        let mut packet = PhantomPacket::ok();
+
+        packet.body.username = self.user.clone();
+        packet.body.password = self.pass.clone();
+
+        self.send_phantom_packet(packet).await.unwrap();
 
         if self.keep_alive.enabled {
             self.start_keepalive().unwrap();
