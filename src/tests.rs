@@ -412,7 +412,7 @@ async fn test_custom_authentication() {
 #[tokio::test]
 async fn test_encryption() {
     let key = Encryptor::generate_key();
-    let encryptor = Encryptor::new(&key);
+    let encryptor = Encryptor::new(&key).unwrap();
 
     let original_packet = MyPacket::ok();
     let encrypted = original_packet.encrypted_ser(&encryptor);

@@ -88,6 +88,12 @@ impl PhantomPacket {
             ..Default::default()
         }
     }
+    
+    pub fn cast_recv_packet<T: Packet>(&self) -> Option<T> {
+        self.recv_packet.as_ref().and_then(|packet_str| {
+            serde_json::from_str::<T>(packet_str).ok()
+        })
+    }
 }
 
 impl Packet for PhantomPacket {

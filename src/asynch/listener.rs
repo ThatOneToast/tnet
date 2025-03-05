@@ -318,11 +318,9 @@ where
     ///
     /// * Panics if the specified pool doesn't exist
     pub async fn add_socket_to_pool(&mut self, pool_name: &str, socket: &TSocket<S>) {
-        let socket = socket.clone();
-        let mut pools = self.pools.clone();
-        let mut pool = pools.write().await;
+        let mut pool = self.pools.write().await;
         let pool = pool.get_mut(pool_name).expect("Unknown Pool");
-        pool.add(socket).await;
+        pool.add(socket.clone()).await;
     }
 
     /// Gets a reference to the connection pools.
@@ -386,7 +384,7 @@ where
         drop(sock);
 
         let shared_secret = key_exchange.compute_shared_secret(&client_public_key);
-        Ok(Encryptor::new(&shared_secret))
+        Ok(Encryptor::new(&shared_secret).expect("Failed to create encryptor"))
     }
 
     /// Handles the authentication process for a client connection.

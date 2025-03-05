@@ -1,4 +1,4 @@
-use crate::packet::Packet;
+use crate::packet::{Packet, PacketBody};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -108,10 +108,13 @@ async fn ok(
     _pools: PoolRef<PhantomSession>,
     _resources: ResourceRef<PhantomResources>,
 ) {
+    println!("Phantom listener received packet: {:?}", packet);
+
     if packet.header.as_str() == "relay" {
         let sent_packet = match &packet.sent_packet {
             Some(p) => p,
             None => {
+                println!("No packet to relay - sending error response");
                 socket
                     .send(PhantomPacket::error(Error::Other(
                         "No packet to relay".to_string(),
@@ -125,6 +128,7 @@ async fn ok(
         let client_config = match &packet.client_config {
             Some(config) => config,
             None => {
+                println!("No client config - sending error response");
                 socket
                     .send(PhantomPacket::error(Error::InvalidClientConfig))
                     .await
@@ -140,41 +144,76 @@ async fn ok(
             client_config.server_port
         );
 
+        // Create a new phantom client for the target server
         match AsyncPhantomClient::from_client_config(client_config).await {
             Ok(mut phantom_client) => {
+                println!("Successfully created phantom client, finalizing...");
                 phantom_client.finalize().await;
                 println!("Phantom client connection established");
 
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Wait a bit for the connection to stabilize
+                tokio::time::sleep(Duration::from_millis(300)).await;
 
-                match phantom_client
-                    .send_recv_raw(sent_packet.as_bytes().to_vec())
-                    .await
-                {
+                // Get the raw bytes from the sent packet
+                let sent_bytes = sent_packet.as_bytes().to_vec();
+                println!(
+                    "Sending {} bytes to destination server...",
+                    sent_bytes.len()
+                );
+
+                // Try to send the data and wait for response
+                match phantom_client.send_recv_raw(sent_bytes).await {
                     Ok(response_data) => {
-                        let response_str = String::from_utf8(response_data)
-                            .map_err(|e| eprintln!("Failed to convert response to string ::: {e}"))
-                            .unwrap();
-                        println!("Received response from destination: {}", response_str);
+                        println!(
+                            "Received response from destination ({} bytes)",
+                            response_data.len()
+                        );
 
-                        let mut response_packet = PhantomPacket::response();
-                        response_packet.recv_packet = Some(response_str);
+                        // Convert the response to a string
+                        let response_str = String::from_utf8(response_data).expect("Failed to convert response data to string");
+                        println!("Response content: {}", response_str);
 
+                        // Create a relay-response packet
+                        let response_packet = PhantomPacket {
+                            header: "relay-response".to_string(), 
+                            body: PacketBody::default(),
+                            sent_packet: None,
+                            recv_packet: Some(response_str),
+                            client_config: None,
+                        };
+
+                        println!(
+                            "Sending relay response back to client: {:?}",
+                            response_packet
+                        );
                         if let Err(e) = socket.send(response_packet).await {
                             eprintln!("Failed to send response back to client: {}", e);
+                        } else {
+                            println!("Response sent successfully to client");
                         }
                     }
                     Err(e) => {
                         eprintln!("Error receiving response from destination: {}", e);
-                        let _ = socket.send(PhantomPacket::error(e)).await;
+                        let err_packet = PhantomPacket::error(e.clone());
+                        println!("Sending error response: {:?}", err_packet);
+                        if let Err(send_err) = socket.send(err_packet).await {
+                            eprintln!("Also failed to send error response: {}", send_err);
+                        }
                     }
                 }
             }
             Err(e) => {
                 eprintln!("Failed to create phantom client: {}", e);
-                let _ = socket.send(PhantomPacket::error(e)).await;
+                let err_packet = PhantomPacket::error(e.clone());
+                println!("Sending error response: {:?}", err_packet);
+                if let Err(send_err) = socket.send(err_packet).await {
+                    eprintln!("Also failed to send error response: {}", send_err);
+                }
             }
         }
+    } else {
+        println!("Received non-relay packet: {:?}", packet);
+        let _ = socket.send(PhantomPacket::ok()).await;
     }
 }
 

@@ -461,7 +461,9 @@ where
         }
 
         if let Some(key) = config.key {
-            self.encryption = ClientEncryption::Encrypted(Box::new(Encryptor::new(&key)));
+            self.encryption = ClientEncryption::Encrypted(Box::new(
+                Encryptor::new(&key).expect("Failed to create encryptor"),
+            ));
             return Ok(self);
         }
 
@@ -547,7 +549,9 @@ where
         server_public_key.copy_from_slice(&server_response[4..4 + length]);
 
         let shared_secret = key_exchange.compute_shared_secret(&server_public_key);
-        self.encryption = ClientEncryption::Encrypted(Box::new(Encryptor::new(&shared_secret)));
+        self.encryption = ClientEncryption::Encrypted(Box::new(
+            Encryptor::new(&shared_secret).expect("Failed to create encryptor"),
+        ));
 
         Ok(())
     }

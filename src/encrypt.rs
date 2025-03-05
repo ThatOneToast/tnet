@@ -1,10 +1,8 @@
-use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, Key, Nonce,
-};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use rand::RngCore;
-use x25519_dalek::{PublicKey, StaticSecret};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use tcrypt::key_exchange::{protocol::SecureChannel, DHKeyExchange};
+use tcrypt::prelude::X25519PublicKey as PublicKey;
+use tcrypt::EncryptionError;
 
 /// Provides encryption and decryption capabilities using AES-256-GCM.
 ///
@@ -26,7 +24,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 /// ```
 #[derive(Clone)]
 pub struct Encryptor {
-    cipher: Aes256Gcm,
+    channel: SecureChannel,
 }
 
 impl Encryptor {
@@ -39,11 +37,10 @@ impl Encryptor {
     /// # Returns
     ///
     /// * A new `Encryptor` instance
-    #[must_use]
-    pub fn new(key: &[u8]) -> Self {
-        let key = Key::<Aes256Gcm>::from_slice(key);
-        let cipher = Aes256Gcm::new(key);
-        Self { cipher }
+    pub fn new(key: &[u8]) -> Result<Self, EncryptionError> {
+        Ok(Self {
+            channel: SecureChannel::new(key)?,
+        })
     }
 
     /// Generates a new random 32-byte encryption key.
@@ -53,8 +50,10 @@ impl Encryptor {
     /// * A 32-byte array containing the generated key
     #[must_use]
     pub fn generate_key() -> [u8; 32] {
+        let exchange = DHKeyExchange::new();
         let mut key = [0u8; 32];
-        OsRng.fill_bytes(&mut key);
+        let shared_secret = exchange.generate_shared_secret(exchange.public_key());
+        key.copy_from_slice(&shared_secret[..32]);
         key
     }
 
@@ -80,20 +79,9 @@ impl Encryptor {
     /// let encryptor = Encryptor::new(&key);
     /// let encrypted = encryptor.encrypt(b"Secret data").unwrap();
     /// ```
-    pub fn encrypt(&self, data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-        let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
-        let nonce = Nonce::from_slice(&nonce);
-
-        let ciphertext = self
-            .cipher
-            .encrypt(nonce, data)
-            .map_err(|e| e.to_string())?;
-
-        let mut combined = nonce.to_vec();
-        combined.extend_from_slice(&ciphertext);
-
-        Ok(BASE64.encode(combined))
+    pub fn encrypt(&self, data: &[u8]) -> Result<String, EncryptionError> {
+        let encrypted = self.channel.encrypt(data)?;
+        Ok(BASE64.encode(&encrypted))
     }
 
     /// Decrypts the provided encrypted data.
@@ -122,21 +110,11 @@ impl Encryptor {
     /// let encrypted = encryptor.encrypt(b"Secret data").unwrap();
     /// let decrypted = encryptor.decrypt(&encrypted).unwrap();
     /// ```
-    pub fn decrypt(&self, data: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn decrypt(&self, data: &str) -> Result<Vec<u8>, EncryptionError> {
         let decoded = BASE64
-            .decode(data.as_bytes())
-            .map_err(|e| format!("Base64 decode failed: {}", e))?;
-
-        if decoded.len() < 12 {
-            return Err("Data too short".into());
-        }
-
-        let nonce = Nonce::from_slice(&decoded[0..12]);
-        let ciphertext = &decoded[12..];
-
-        self.cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| format!("Decryption failed: {}", e).into())
+            .decode(data)
+            .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
+        self.channel.decrypt(&decoded)
     }
 }
 
@@ -162,8 +140,7 @@ impl Encryptor {
 /// assert_eq!(alice_shared, bob_shared);
 /// ```
 pub struct KeyExchange {
-    pub private_key: StaticSecret,
-    pub public_key: PublicKey,
+    exchange: DHKeyExchange,
 }
 
 impl KeyExchange {
@@ -174,11 +151,8 @@ impl KeyExchange {
     /// * A new `KeyExchange` instance
     #[must_use]
     pub fn new() -> Self {
-        let private_key = StaticSecret::random_from_rng(rand::thread_rng());
-        let public_key = PublicKey::from(&private_key);
         Self {
-            private_key,
-            public_key,
+            exchange: DHKeyExchange::new(),
         }
     }
 
@@ -189,7 +163,7 @@ impl KeyExchange {
     /// * A 32-byte array containing the public key
     #[must_use]
     pub fn get_public_key(&self) -> [u8; 32] {
-        self.public_key.to_bytes()
+        *self.exchange.public_key().as_bytes()
     }
 
     /// Computes the shared secret using the other party's public key.
@@ -213,9 +187,12 @@ impl KeyExchange {
     /// ```
     #[must_use]
     pub fn compute_shared_secret(&self, other_public: &[u8; 32]) -> [u8; 32] {
-        let other_public = PublicKey::from(*other_public);
-        let shared_secret = self.private_key.diffie_hellman(&other_public);
-        shared_secret.to_bytes()
+        let mut key = [0u8; 32];
+        let shared = self
+            .exchange
+            .generate_shared_secret(&PublicKey::from(*other_public));
+        key.copy_from_slice(&shared[..32]);
+        key
     }
 }
 

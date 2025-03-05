@@ -1,13 +1,13 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, Mutex},
 };
 
@@ -88,27 +88,32 @@ impl AsyncPhantomClient {
     /// }
     /// ```
     pub async fn new(ip: &str, port: u16) -> Result<Self, Error> {
+        println!("Connecting to phantom server at {}:{}", ip, port);
         let server = tokio::net::TcpStream::connect((ip, port))
             .await
             .map_err(|e| Error::IoError(e.to_string()))?;
+
+        println!("Connected to phantom server");
 
         let (writer_tx, mut writer_rx) = mpsc::channel::<ClientMessage>(32);
         let (reader_tx, reader_rx) = mpsc::channel::<Vec<u8>>(32);
 
         // Split the connection
-        let (_read_half, mut write_half) = server.into_split();
+        let (mut read_half, mut write_half) = server.into_split();
 
+        // Spawn writer task
         tokio::spawn({
             async move {
                 while let Some(msg) = writer_rx.recv().await {
                     match msg {
                         ClientMessage::Data(data) | ClientMessage::Keepalive(data) => {
+                            println!("DEBUG: Writing {} bytes to phantom server", data.len());
                             if let Err(e) = write_half.write_all(&data).await {
-                                eprintln!("{e}");
+                                eprintln!("Write error: {e}");
                                 break;
                             }
                             if let Err(e) = write_half.flush().await {
-                                eprintln!("{e}");
+                                eprintln!("Flush error: {e}");
                                 break;
                             }
                         }
@@ -117,6 +122,39 @@ impl AsyncPhantomClient {
                         }
                     }
                 }
+                println!("DEBUG: Writer task ended");
+            }
+        });
+
+        // Clone reader_tx before moving it
+        let reader_tx_clone = reader_tx.clone();
+
+        // Spawn reader task
+        tokio::spawn({
+            async move {
+                println!("DEBUG: Reader task started");
+                let mut buf = vec![0; 4096];
+                loop {
+                    match read_half.read(&mut buf).await {
+                        Ok(n) if n > 0 => {
+                            println!("DEBUG: Read {} bytes from phantom server", n);
+                            let data = buf[..n].to_vec();
+                            if let Err(e) = reader_tx_clone.send(data).await {
+                                eprintln!("Reader send error: {e}");
+                                break;
+                            }
+                        }
+                        Ok(n) => {
+                            println!("DEBUG: Connection closed by phantom server ({} bytes)", n);
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("Read error: {e}");
+                            break;
+                        }
+                    }
+                }
+                println!("DEBUG: Reader task ended");
             }
         });
 
@@ -280,7 +318,9 @@ impl AsyncPhantomClient {
         }
 
         if let Some(key) = config.key {
-            self.encryption = ClientEncryption::Encrypted(Box::new(Encryptor::new(&key)));
+            self.encryption = ClientEncryption::Encrypted(Box::new(
+                Encryptor::new(&key).expect("Failed to create encryptor"),
+            ));
             return Ok(self);
         }
 
@@ -357,7 +397,9 @@ impl AsyncPhantomClient {
         server_public_key.copy_from_slice(&server_public[..32]);
 
         let shared_secret = key_exchange.compute_shared_secret(&server_public_key);
-        self.encryption = ClientEncryption::Encrypted(Box::new(Encryptor::new(&shared_secret)));
+        self.encryption = ClientEncryption::Encrypted(Box::new(
+            Encryptor::new(&shared_secret).expect("Failed to create encryptor"),
+        ));
 
         Ok(())
     }
@@ -443,6 +485,30 @@ impl AsyncPhantomClient {
     pub async fn send_recv(&mut self, packet: PhantomPacket) -> Result<PhantomPacket, Error> {
         self.send(packet).await?;
         self.recv().await
+    }
+
+    /// Sends a packet and waits for a response with debug output.
+    ///
+    /// This is a debug version of send_recv with more logging.
+    pub async fn send_recv_with_debug(
+        &mut self,
+        packet: PhantomPacket,
+    ) -> Result<PhantomPacket, Error> {
+        println!("DEBUG: Sending phantom packet: {:?}", packet);
+
+        self.send(packet).await.map_err(|e| {
+            println!("DEBUG: Error sending packet: {:?}", e);
+            e
+        })?;
+
+        println!("DEBUG: Waiting for response...");
+        let response = self.recv().await.map_err(|e| {
+            println!("DEBUG: Error receiving response: {:?}", e);
+            e
+        })?;
+
+        println!("DEBUG: Received response: {:?}", response);
+        Ok(response)
     }
 
     /// Starts the keep-alive mechanism.
@@ -570,18 +636,25 @@ impl AsyncPhantomClient {
     /// - Decryption fails
     /// - UTF-8 conversion fails
     pub async fn recv_raw(&mut self) -> Result<Vec<u8>, Error> {
-        tokio::time::sleep(Duration::from_nanos(250_000)).await;
+        let data = match tokio::time::timeout(Duration::from_secs(5), self.response_rx.recv()).await
+        {
+            Ok(Some(data)) => data,
+            Ok(None) => return Err(Error::ConnectionClosed),
+            Err(_) => return Err(Error::Other("Timeout waiting for response".to_string())),
+        };
 
-        let data = self
-            .response_rx
-            .recv()
-            .await
-            .ok_or(Error::ConnectionClosed)?;
+        // For debugging
+        println!("DEBUG: Received raw data of length: {}", data.len());
 
+        // No need to sleep here as we're already waiting in the timeout
         let data = match &self.encryption {
-            ClientEncryption::Encrypted(encryptor) => encryptor
-                .decrypt(String::from_utf8(data).unwrap().as_str())
-                .unwrap(),
+            ClientEncryption::Encrypted(encryptor) => {
+                let text = String::from_utf8_lossy(&data);
+                match encryptor.decrypt(&text) {
+                    Ok(decrypted) => decrypted,
+                    Err(e) => return Err(Error::EncryptionError(e.to_string())),
+                }
+            }
             ClientEncryption::None => data,
         };
 
