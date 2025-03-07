@@ -6,6 +6,8 @@ A robust async TCP networking library for Rust that provides:
 - Authentication
 - Keep-alive mechanisms
 - Broadcast capabilities
+- Automatic reconnection
+
 
 ## Features
 
@@ -14,7 +16,9 @@ A robust async TCP networking library for Rust that provides:
 - 📡 **Keep-alive** - Automatic connection maintenance
 - 🔄 **Session Management** - Track and manage client sessions
 - 📢 **Broadcasting** - Send messages to multiple clients
+- 🔌 **Reconnection** - Resilient connections with automatic reconnection and exponential backoff
 - 🚀 **Async/Await** - Built on tokio for high performance
+
 
 ## Example Usage
 
@@ -173,7 +177,8 @@ async fn main() {
         .with_encryption_config(EncryptionConfig::default_on())
         .await
         .unwrap()
-        .with_keep_alive(KeepAliveConfig::default_on());
+        .with_keep_alive(KeepAliveConfig::default_on())
+        .with_reconnection(ReconnectionConfig::default_on());
 
     // Finalize connection
     client.finalize().await;
@@ -185,6 +190,47 @@ async fn main() {
 ```
 
 ## Advanced Usage
+
+### Auto-Reconnection
+
+The client can automatically reconnect when the connection is lost, preserving session state:
+
+```rust
+// Configure client with reconnection settings
+let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8080)
+    .await
+    .unwrap()
+    .with_reconnection(ReconnectionConfig {
+        // Enable automatic reconnection
+        auto_reconnect: true,
+
+        // Fallback endpoints to try if primary connection fails
+        endpoints: vec![("backup.server.com".to_string(), 8081)],
+
+        // Maximum number of reconnection attempts (None for unlimited)
+        max_attempts: Some(5),
+
+        // Base delay between reconnection attempts in seconds
+        initial_retry_delay: 1.0,
+
+        // Maximum delay between reconnection attempts in seconds
+        max_retry_delay: 60.0,
+
+        // Multiplier for exponential backoff
+        backoff_factor: 1.5,
+
+        // Random jitter factor to add to delay to prevent thundering herd
+        jitter: 0.1,
+
+        // Whether to reinitialize session after successful reconnection
+        reinitialize: true,
+
+        ..Default::default()
+    });
+
+// The client will now automatically reconnect when the connection is lost,
+// and will maintain session state across reconnections.
+```
 
 ### Broadcasting
 
@@ -217,6 +263,28 @@ let authenticator = Authenticator::new(AuthType::UserPassword)
             }
         })
     });
+```
+
+### Handling Connection Interruptions
+
+The library is designed to handle connection interruptions gracefully:
+
+```rust
+// Send with automatic reconnection if the connection fails
+match client.send_recv(MyPacket::ok()).await {
+    Ok(response) => {
+        println!("Got response: {:?}", response);
+    },
+    Err(e) => {
+        if client.is_reconnected() {
+            // The connection was restored, but the operation failed
+            println!("Operation failed after reconnection: {}", e);
+        } else {
+            // The connection could not be restored
+            println!("Connection lost and could not be restored: {}", e);
+        }
+    }
+}
 ```
 
 ## License
