@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     marker::PhantomData,
     sync::{
         Arc,
@@ -19,7 +18,6 @@ use crate::{
     errors::Error,
     packet::{self, Packet},
     phantom::PhantomPacket,
-    reconnect::ReconnectionManager,
 };
 
 use super::client_ext::AsyncClientRef;
@@ -193,7 +191,7 @@ pub struct ReconnectionConfig {
 }
 
 impl ReconnectionConfig {
-    pub fn default_on() -> Self {
+    pub const fn default_on() -> Self {
         Self {
             endpoints: Vec::new(),
             auto_reconnect: true,
@@ -259,11 +257,14 @@ where
     keep_alive: KeepAliveConfig,
     keep_alive_cold_start: Arc<Mutex<bool>>,
     keep_alive_running: Arc<AtomicBool>,
+    keepalive_reconnect_needed: Arc<AtomicBool>,
+    pub(crate) keepalive_reconnect_tx: Option<mpsc::Sender<()>>,
     response_rx: mpsc::Receiver<Vec<u8>>,
     broadcast_handler: Option<Arc<BroadcastHandler<P>>>,
     reconnection_config: ReconnectionConfig,
     current_endpoint: Option<(String, u16)>,
     connection_closed: Arc<AtomicBool>,
+    connection_stable: Arc<AtomicBool>,
     _packet: PhantomData<P>,
 }
 
@@ -402,6 +403,9 @@ where
             reconnection_config: ReconnectionConfig::default(),
             current_endpoint: Some((ip.to_string(), port)),
             connection_closed,
+            connection_stable: Arc::new(AtomicBool::new(true)),
+            keepalive_reconnect_tx: None,
+            keepalive_reconnect_needed: Arc::new(AtomicBool::new(false)),
             _packet: PhantomData,
         })
     }
@@ -411,153 +415,90 @@ where
             return Err(Error::ConnectionClosed);
         }
 
-        // Reset connection_closed flag
-        self.connection_closed.store(false, Ordering::SeqCst);
-
-        println!("Starting reconnection attempt...");
-
         let mut attempt = 0;
-        let mut current_delay = self.reconnection_config.initial_retry_delay;
-        let max_attempts = self.reconnection_config.max_attempts;
+        let max_attempts = self.reconnection_config.max_attempts.unwrap_or(usize::MAX);
 
-        // Create a list of endpoints to try
-        let mut endpoints = VecDeque::new();
+        while attempt < max_attempts {
+            let delay = self.calculate_backoff_delay(attempt);
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
 
-        // Get the original endpoint
-        if let Some((ip, port)) = self.current_endpoint.clone() {
-            endpoints.push_back((ip, port));
-        }
-
-        // Then add all fallback endpoints
-        for endpoint in &self.reconnection_config.endpoints {
-            // Don't add duplicate endpoints
-            if Some(endpoint) != self.current_endpoint.as_ref() {
-                endpoints.push_back(endpoint.clone());
-            }
-        }
-
-        while max_attempts.is_none() || attempt < max_attempts.unwrap() {
-            // If we've tried all endpoints, rotate back to the beginning
-            if endpoints.is_empty() {
-                if let Some((ip, port)) = self.current_endpoint.clone() {
-                    endpoints.push_back((ip, port));
-                }
-
-                for endpoint in &self.reconnection_config.endpoints {
-                    if Some(endpoint) != self.current_endpoint.as_ref() {
-                        endpoints.push_back(endpoint.clone());
-                    }
-                }
-            }
-
-            if endpoints.is_empty() {
-                return Err(Error::Other(
-                    "No endpoints available for reconnection".to_string(),
-                ));
-            }
-
-            let (ip, port) = endpoints.pop_front().unwrap();
-
-            // Try to connect
-            println!(
-                "Attempting reconnection to {}:{} (attempt {} of {:?})",
-                ip,
-                port,
-                attempt + 1,
-                max_attempts
-            );
-
-            // Calculate backoff delay with jitter
-            let jitter_factor = rand::random::<f64>()
-                .mul_add(2.0, -1.0)
-                .mul_add(self.reconnection_config.jitter, 1.0);
-            let adjusted_delay = current_delay * jitter_factor;
-
-            // Delay before reconnection attempt (except for first attempt)
-            if attempt > 0 {
-                println!(
-                    "Waiting for {:.2} seconds before next attempt",
-                    adjusted_delay
-                );
-                tokio::time::sleep(Duration::from_secs_f64(adjusted_delay)).await;
-            }
-
-            match Self::new(&ip, port).await {
+            match Self::new(
+                &self.current_endpoint.as_ref().unwrap().0,
+                self.current_endpoint.as_ref().unwrap().1,
+            )
+            .await
+            {
                 Ok(mut new_client) => {
-                    println!(
-                        "Successfully connected to {}:{}, transferring state...",
-                        ip, port
-                    );
-
-                    // Transfer essential state from old client to new client
+                    // Transfer state
                     new_client.encryption = self.encryption.clone();
-                    new_client.session_id = self.session_id.clone();
                     new_client.user = self.user.clone();
                     new_client.pass = self.pass.clone();
                     new_client.keep_alive = self.keep_alive.clone();
-                    new_client.keep_alive_cold_start = Arc::new(Mutex::new(true)); // Reset cold start
                     new_client.broadcast_handler = self.broadcast_handler.clone();
                     new_client.reconnection_config = self.reconnection_config.clone();
 
-                    // Replace old client fields with new client's fields
+                    // Replace connection
                     self.connection = new_client.connection;
                     self.response_rx = new_client.response_rx;
-                    self.current_endpoint = Some((ip.clone(), port));
-                    self.connection_closed = new_client.connection_closed;
+                    self.connection_closed.store(false, Ordering::SeqCst);
 
-                    // Re-initialize if needed
+                    // Initialize the connection
                     if self.reconnection_config.reinitialize {
-                        println!("Reinitializing connection...");
-
-                        // Send initialization packet with existing session ID
-                        let mut init_packet = P::ok();
-
-                        if let Some(id) = &self.session_id {
-                            init_packet.session_id(Some(id.clone()));
-                        } else if let (Some(user), Some(pass)) = (&self.user, &self.pass) {
-                            init_packet.body_mut().username = Some(user.clone());
-                            init_packet.body_mut().password = Some(pass.clone());
-                        }
-
-                        match self.send(init_packet).await {
-                            Ok(_) => println!("Reinitialization packet sent successfully"),
-                            Err(e) => {
-                                println!("Failed to send reinitialization packet: {}", e);
-                                // Continue with next attempt
+                        match self.initialize_connection().await {
+                            Ok(_) => return Ok(()),
+                            Err(_) => {
                                 attempt += 1;
-                                current_delay = (current_delay
-                                    * self.reconnection_config.backoff_factor)
-                                    .min(self.reconnection_config.max_retry_delay);
                                 continue;
                             }
                         }
-
-                        // Restart keep-alive if it was running
-                        if self.keep_alive.enabled {
-                            match self.start_keepalive() {
-                                Ok(_) => println!("Keep-alive restarted successfully"),
-                                Err(e) => println!("Failed to restart keepalive: {}", e),
-                            }
-                        }
+                    } else {
+                        return Ok(());
                     }
-
-                    println!("Successfully reconnected to {}:{}", ip, port);
-                    return Ok(());
                 }
-                Err(e) => {
-                    println!("Reconnection attempt to {}:{} failed: {}", ip, port, e);
-                    // Try next endpoint
+                Err(_) => {
                     attempt += 1;
-                    current_delay = (current_delay * self.reconnection_config.backoff_factor)
-                        .min(self.reconnection_config.max_retry_delay);
+                    continue;
                 }
             }
         }
 
-        Err(Error::Other(format!(
-            "Failed to reconnect after {} attempts",
-            attempt
-        )))
+        Err(Error::IoError(
+            "Maximum reconnection attempts reached".to_string(),
+        ))
+    }
+
+    fn calculate_backoff_delay(&self, attempt: usize) -> f64 {
+        let base_delay = self.reconnection_config.initial_retry_delay;
+        let max_delay = self.reconnection_config.max_retry_delay;
+        let backoff = base_delay * self.reconnection_config.backoff_factor.powi(attempt as i32);
+        let jitter = rand::random::<f64>() * self.reconnection_config.jitter * backoff;
+        (backoff + jitter).min(max_delay)
+    }
+
+    async fn initialize_connection(&mut self) -> Result<(), Error> {
+        let mut init_packet = P::ok();
+        if let (Some(user), Some(pass)) = (&self.user, &self.pass) {
+            init_packet.body_mut().username = Some(user.clone());
+            init_packet.body_mut().password = Some(pass.clone());
+        }
+
+        match self.send_recv(init_packet).await {
+            Ok(mut response) => {
+                if response.header() == P::ok().header() {
+                    self.session_id = response.session_id(None);
+
+                    // Start keepalive after successful initialization
+                    if self.keep_alive.enabled {
+                        let _ = self.start_keepalive();
+                    }
+
+                    Ok(())
+                } else {
+                    Err(Error::Other("Initialization failed".to_string()))
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Configures reconnection behavior for the client.
@@ -840,9 +781,7 @@ where
             return Err(Error::ConnectionClosed);
         }
 
-        // Small delay before sending to avoid overwhelming the connection
-        tokio::time::sleep(Duration::from_nanos(500_000)).await;
-
+        // Add session ID if available
         if let Some(id) = self.session_id.clone() {
             packet.session_id(Some(id));
         } else if let Some(user) = &self.user {
@@ -869,12 +808,14 @@ where
             Ok(Err(e)) => {
                 println!("Send error: {}", e);
                 self.connection_closed.store(true, Ordering::SeqCst);
-                Err(Error::Other(format!("Send error: {}", e)))
+                self.connection_stable.store(false, Ordering::SeqCst);
+                Err(Error::IoError(format!("Send error: {}", e)))
             }
             Err(_) => {
                 println!("Send operation timed out");
                 self.connection_closed.store(true, Ordering::SeqCst);
-                Err(Error::Other("Send operation timed out".to_string()))
+                self.connection_stable.store(false, Ordering::SeqCst);
+                Err(Error::IoError("Send operation timed out".to_string()))
             }
         }
     }
@@ -946,53 +887,31 @@ where
     ///
     /// Returns an error if the connection is closed
     pub async fn recv(&mut self) -> Result<P, Error> {
-        // Check if connection is already known to be closed
         if self.connection_closed.load(Ordering::SeqCst) {
             return Err(Error::ConnectionClosed);
         }
 
-        // Create a timeout for receive operations
-        let timeout_duration = Duration::from_secs(5); // 5 second timeout
-
-        match tokio::time::timeout(timeout_duration, Box::pin(self.response_rx.recv())).await {
+        match tokio::time::timeout(Duration::from_secs(10), self.response_rx.recv()).await {
             Ok(Some(data)) => {
-                let mut packet = match &self.encryption {
+                let packet = match &self.encryption {
                     ClientEncryption::None => P::de(&data),
                     ClientEncryption::Encrypted(encryptor) => P::encrypted_de(&data, encryptor),
                 };
 
-                // Check if this is a broadcast packet
-                if packet.is_broadcasting() {
-                    if let Some(handler) = &self.broadcast_handler {
-                        let handler = handler.clone();
-                        handler(&packet);
-                    }
-                    // Recursively call recv to get the next packet
+                if packet.header() == P::keep_alive().header() {
+                    println!("Skipping keep-alive packet during recv");
                     return Box::pin(self.recv()).await;
-                }
-
-                if let Some(id) = packet.session_id(None) {
-                    self.session_id = Some(id);
                 }
 
                 Ok(packet)
             }
             Ok(None) => {
-                // Connection is closed
-                println!("Connection closed (recv returned None)");
                 self.connection_closed.store(true, Ordering::SeqCst);
-
-                // Try to reconnect
-                Box::pin(self.try_reconnect()).await?;
-                Err(Error::Other(
-                    "Connection was closed but reconnected successfully".to_string(),
-                ))
+                Err(Error::ConnectionClosed)
             }
             Err(_) => {
-                // Timeout occurred
-                println!("Receive operation timed out");
-                self.connection_closed.store(true, Ordering::SeqCst);
-                Err(Error::Other("Receive operation timed out".to_string()))
+                // Just return timeout error without any reconnection attempt
+                Err(Error::IoError("Receive operation timed out".to_string()))
             }
         }
     }
@@ -1013,62 +932,50 @@ where
     /// - Sending the packet fails
     /// - Receiving the response fails
     pub async fn send_recv(&mut self, packet: P) -> Result<P, Error> {
-        // Check if connection is closed before even trying to send
-        if self.connection_closed.load(Ordering::SeqCst) {
-            println!("Connection is closed, attempting reconnection before send_recv");
-            self.try_reconnect().await?;
-        }
+        let mut attempt_count = 0;
+        let max_attempts = self.reconnection_config.max_attempts.unwrap_or(5);
 
-        // Send with retry logic
-        let mut retries = 0;
-        const MAX_RETRIES: usize = 3;
-
-        while retries < MAX_RETRIES {
-            match self.send(packet.clone()).await {
-                Ok(_) => break,
+        loop {
+            match Box::pin(self.send(packet.clone())).await {
+                Ok(_) => match Box::pin(self.recv()).await {
+                    Ok(response) => return Ok(response),
+                    Err(e) => {
+                        if matches!(e, Error::ConnectionClosed | Error::IoError(_))
+                            && attempt_count < max_attempts
+                        {
+                            attempt_count += 1;
+                            match Box::pin(self.try_reconnect()).await {
+                                Ok(_) => continue,
+                                Err(_) if attempt_count < max_attempts => {
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                },
                 Err(e) => {
-                    if retries == MAX_RETRIES - 1 {
+                    if matches!(e, Error::ConnectionClosed | Error::IoError(_))
+                        && attempt_count < max_attempts
+                    {
+                        attempt_count += 1;
+                        match Box::pin(self.try_reconnect()).await {
+                            Ok(_) => continue,
+                            Err(_) if attempt_count < max_attempts => {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    } else {
                         return Err(e);
                     }
-                    println!("Send failed (retry {}/{}): {}", retries + 1, MAX_RETRIES, e);
-                    // Reconnect and retry
-                    if let Err(reconnect_err) = self.try_reconnect().await {
-                        println!("Reconnection failed: {}", reconnect_err);
-                        return Err(reconnect_err);
-                    }
-                    retries += 1;
                 }
             }
         }
-
-        // Receive with retry logic
-        retries = 0;
-        while retries < MAX_RETRIES {
-            match self.recv().await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    if retries == MAX_RETRIES - 1 {
-                        return Err(e);
-                    }
-                    println!(
-                        "Receive failed (retry {}/{}): {}",
-                        retries + 1,
-                        MAX_RETRIES,
-                        e
-                    );
-                    // Reconnect and retry receive
-                    if let Err(reconnect_err) = self.try_reconnect().await {
-                        println!("Reconnection failed: {}", reconnect_err);
-                        return Err(reconnect_err);
-                    }
-                    retries += 1;
-                }
-            }
-        }
-
-        Err(Error::Other(
-            "Send/receive failed after max retries".to_string(),
-        ))
     }
 
     /// Starts the keep-alive mechanism.
@@ -1076,7 +983,7 @@ where
     /// # Returns
     ///
     /// * `Result<(), Error>` - Success or failure of keep-alive initialization
-    fn start_keepalive<'a>(&self) -> Result<(), Error>
+    fn start_keepalive<'a>(&mut self) -> Result<(), Error>
     where
         P: 'a,
     {
@@ -1084,10 +991,7 @@ where
             return Ok(());
         }
 
-        let session_id = self
-            .session_id
-            .clone()
-            .ok_or_else(|| Error::Other("Cannot start keepalive without session ID".to_string()))?;
+        let session_id = self.session_id.clone().unwrap_or_default();
 
         let interval = self.keep_alive.interval;
         let encryption = self.encryption.clone();
@@ -1095,9 +999,13 @@ where
         let writer_tx = self.connection.writer_tx.clone();
         let cold_start = self.keep_alive_cold_start.clone();
         let connection_closed = self.connection_closed.clone();
+        let connection_stable = self.connection_stable.clone();
+        let keepalive_reconnect_needed = Arc::new(AtomicBool::new(false));
+        self.keepalive_reconnect_needed = keepalive_reconnect_needed.clone();
 
         keep_alive_running.store(true, Ordering::SeqCst);
 
+        // Spawn keepalive task
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval));
             let mut consecutive_failures = 0;
@@ -1149,9 +1057,36 @@ where
                     }
                 }
 
+                // Verify connection with a ping periodically
+                if consecutive_failures == 0 && rand::random::<u8>() % 5 == 0 {
+                    // 20% chance to check
+                    let (ping_tx, ping_rx) = tokio::sync::oneshot::channel();
+
+                    match writer_tx.send(ClientMessage::Ping(ping_tx)).await {
+                        Ok(()) => {
+                            match tokio::time::timeout(Duration::from_secs(2), ping_rx).await {
+                                Ok(Ok(true)) => {
+                                    // Ping successful, connection verified
+                                }
+                                _ => {
+                                    println!("Ping failed, connection may be unstable");
+                                    consecutive_failures += 1;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            println!("Failed to send ping request");
+                            consecutive_failures += 1;
+                        }
+                    }
+                }
+
                 if consecutive_failures >= 3 {
-                    println!("Keepalive failed 3 times consecutively, stopping keepalive");
+                    println!("Keepalive failed 3 times consecutively, triggering reconnection");
                     connection_closed.store(true, Ordering::SeqCst);
+                    connection_stable.store(false, Ordering::SeqCst);
+                    keepalive_reconnect_needed.store(true, Ordering::SeqCst);
+
                     keep_alive_running.store(false, Ordering::SeqCst);
                     break;
                 }

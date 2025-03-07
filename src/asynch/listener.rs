@@ -317,6 +317,7 @@ where
     /// # Panics
     ///
     /// * Panics if the specified pool doesn't exist
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn add_socket_to_pool(&mut self, pool_name: &str, socket: &TSocket<S>) {
         let mut pool = self.pools.write().await;
         let pool = pool.get_mut(pool_name).expect("Unknown Pool");
@@ -401,6 +402,7 @@ where
     /// # Returns
     ///
     /// * `Result<Option<Encryptor>, Error>` - The encryption configuration or an error
+    #[allow(clippy::significant_drop_in_scrutinee)]
     async fn handle_authentication(
         &mut self,
         tsocket: &mut TSocket<S>,
@@ -507,6 +509,7 @@ where
     ///     listener.broadcast(packet).await.expect("Broadcast failed");
     /// }
     /// ```
+    #[allow(clippy::significant_drop_in_scrutinee)]
     pub async fn broadcast(&self, packet: P) -> Result<(), Error> {
         let pool = self.keep_alive_pool.clone().sockets;
         for socket in pool.write().await.iter_mut() {

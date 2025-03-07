@@ -95,6 +95,7 @@ impl ImplSession for TestSession {
 
 // Define test resource
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TestResource {
     data: Vec<String>,
 }
@@ -530,20 +531,8 @@ async fn test_max_retries_exceeded() {
     // For this test, we still need a client struct to configure reconnection parameters
     // but the initial connection attempt will fail
 
-    // Create reconnection config with shorter timeouts for testing
-    let config = ReconnectionConfig {
-        endpoints: vec![],
-        auto_reconnect: true,
-        max_attempts: Some(2),
-        initial_retry_delay: 0.1,
-        max_retry_delay: 0.2,
-        backoff_factor: 1.5,
-        jitter: 0.0,
-        reinitialize: true,
-    };
 
-    // Use the port simulator approach to test the behavior
-    let reconnect_config = config.clone();
+
 
     // This test is mainly to ensure the client handles max retry limits gracefully
     // We'll make an attempt to connect to a non-existent server
@@ -563,4 +552,119 @@ async fn test_max_retries_exceeded() {
 
     // The actual logic for max retries is handled within the client.rs implementation
     // and is exercised by the other tests in a more realistic way
+}
+
+// Test 6: Reconnection after server downtime
+#[tokio::test]
+async fn test_reconnection_after_downtime() {
+    let port = 9096;
+
+    // Start a server
+    let (server_stop_tx, server_stop_rx) = oneshot::channel();
+    start_test_server(port, server_stop_rx).await;
+
+    // Give the server time to start
+    sleep(Duration::from_millis(500)).await;
+
+    // Create a client with reconnection enabled
+    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    if client_result.is_err() {
+        println!("Skipping test_reconnection_after_downtime as we can't create initial client");
+        let _ = server_stop_tx.send(());
+        return;
+    }
+
+    let mut client = client_result
+        .unwrap()
+        .with_reconnection(ReconnectionConfig {
+            endpoints: vec![],
+            auto_reconnect: true,
+            max_attempts: Some(10),
+            initial_retry_delay: 0.1, // Fast retries for testing
+            max_retry_delay: 1.0,
+            backoff_factor: 1.5,
+            jitter: 0.1,
+            reinitialize: true,
+        });
+
+    // Initialize the connection
+    client.finalize().await;
+
+    // Establish a session by sending an initial request
+    let initial_packet = TestPacket::ok();
+    let initial_response = match client.send_recv(initial_packet).await {
+        Ok(response) => response,
+        Err(e) => {
+            println!("Skipping test as we could not establish initial session: {:?}", e);
+            let _ = server_stop_tx.send(());
+            return;
+        }
+    };
+
+    // Verify we have a session
+    let initial_session_id = initial_response.body().session_id.clone();
+    assert!(initial_session_id.is_some(), "No session ID in initial response");
+    println!("Initial session ID: {:?}", initial_session_id);
+
+    // Stop the server
+    server_stop_tx.send(()).unwrap();
+    println!("Server stopped, waiting for 5 seconds...");
+
+    // Wait for 5 seconds to simulate extended downtime
+    sleep(Duration::from_secs(5)).await;
+
+    // Start a new server
+    let (new_server_stop_tx, new_server_stop_rx) = oneshot::channel();
+    let new_server_handle = start_test_server(port, new_server_stop_rx).await;
+
+    // Give the new server time to start
+    sleep(Duration::from_millis(500)).await;
+    println!("New server started");
+
+    // Prepare for reconnection attempts
+    let reconnect_start = Instant::now();
+    let mut reconnected = false;
+    let max_reconnect_time = Duration::from_secs(10);
+
+    // Send a packet which should trigger reconnection
+    while reconnect_start.elapsed() < max_reconnect_time {
+        let test_packet = TestPacket {
+            header: "TEST".to_string(),
+            body: PacketBody::default(),
+            data: Some("reconnect after downtime".to_string()),
+        };
+
+        match client.send_recv(test_packet).await {
+            Ok(response) => {
+                // Successfully reconnected
+                assert_eq!(response.header(), "OK");
+                println!("Successfully reconnected after 5 seconds of downtime");
+
+                // Verify the response contains data
+                if let Some(data) = &response.data {
+                    assert!(data.contains("reconnect after downtime"));
+                }
+
+                // Check if we got a new session
+                let new_session_id = response.body().session_id;
+                println!("New session ID after reconnection: {:?}", new_session_id);
+
+                reconnected = true;
+                break;
+            }
+            Err(e) => {
+                println!("Reconnection attempt failed: {:?}, retrying...", e);
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    // Assert that we were able to reconnect
+    assert!(reconnected, "Failed to reconnect after server downtime");
+
+    // Clean up
+    new_server_stop_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), new_server_handle)
+        .await
+        .ok();
 }

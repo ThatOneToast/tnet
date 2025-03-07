@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::packet;
+use crate::{errors::Error, packet};
 
 use super::client::AsyncClient;
 
@@ -21,5 +21,25 @@ impl<P: packet::Packet> AsyncClientRef<P> {
 
     pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, AsyncClient<P>> {
         self.0.read().await
+    }
+
+    pub async fn signal_reconnect(&self) -> Result<(), Error> {
+        let client = self.0.read().await;
+
+        if let Some(tx) = &client.keepalive_reconnect_tx {
+            // Clone the channel to avoid holding the read lock during send
+            let tx_clone = tx.clone();
+            drop(client);
+
+            // Send the reconnect signal
+            match tx_clone.send(()).await {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Error::Other("Failed to signal reconnection".to_string())),
+            }
+        } else {
+            Err(Error::Other(
+                "Keepalive reconnection channel not available".to_string(),
+            ))
+        }
     }
 }
