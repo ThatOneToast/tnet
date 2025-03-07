@@ -22,12 +22,15 @@ pub mod errors;
 pub mod macros;
 pub mod packet;
 pub mod phantom;
+pub mod reconnect;
 pub mod resources;
 pub mod session;
 
 pub mod prelude;
 
 #[cfg(test)]
-mod tests;
+mod reconnection_tests;
 #[cfg(test)]
 mod relay_test;
+#[cfg(test)]
+mod tests;
