@@ -121,10 +121,27 @@ where
     /// sockets.broadcast(packet).await;
     /// # }
     /// ```
-    pub async fn broadcast<P: Packet>(&self, packet: P) {
-        let mut sockets = self.sockets.write().await;
-        for socket in sockets.iter_mut() {
-            socket.send(packet.clone()).await.unwrap();
+    pub async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let errors = {
+            let mut errors = Vec::new();
+
+            {
+                let mut sockets = self.sockets.write().await;
+
+                for socket in sockets.iter_mut() {
+                    if let Err(e) = socket.send(packet.clone()).await {
+                        errors.push(e);
+                    }
+                }
+            }
+
+            errors
+        };
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Other(format!("Broadcast errors: {:?}", errors)))
         }
     }
 }
@@ -398,5 +415,57 @@ where
     pub async fn addr(&self) -> String {
         let socket = self.socket.lock().await;
         socket.peer_addr().unwrap().to_string()
+    }
+}
+
+pub trait BroadcastExt<S: session::Session> {
+    #[allow(async_fn_in_trait)]
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error>;
+}
+
+impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>) {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        if let Err(e) = self.0.clone().send(packet.clone()).await {
+            errors.push(e);
+        }
+        if let Err(e) = self.1.clone().send(packet).await {
+            errors.push(e);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Other(format!(
+                "Tuple broadcast errors: {:?}",
+                errors
+            )))
+        }
+    }
+}
+
+impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S>) {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        if let Err(e) = self.0.clone().send(packet.clone()).await {
+            errors.push(e);
+        }
+        if let Err(e) = self.1.clone().send(packet.clone()).await {
+            errors.push(e);
+        }
+        if let Err(e) = self.2.clone().send(packet).await {
+            errors.push(e);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Other(format!(
+                "Triple tuple broadcast errors: {:?}",
+                errors
+            )))
+        }
     }
 }

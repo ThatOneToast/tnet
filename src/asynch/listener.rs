@@ -76,6 +76,49 @@ impl<S: session::Session> PoolRef<S> {
     pub async fn read(&self) -> RwLockReadGuard<'_, HashMap<String, TSockets<S>>> {
         self.0.read().await
     }
+
+    pub async fn insert(&mut self, name: impl ToString, socket: &TSocket<S>) {
+        self.0
+            .write()
+            .await
+            .get_mut(name.to_string().as_str())
+            .expect("Socket collection not found")
+            .add(socket.clone())
+            .await;
+    }
+
+    pub async fn get(&self, name: impl ToString) -> Option<TSockets<S>> {
+        let lock = self.0.read().await;
+        lock.get(name.to_string().as_str()).cloned()
+    }
+
+    pub async fn broadcast<P: packet::Packet>(&self, packet: P) -> Result<(), Error> {
+        let pools_to_broadcast = {
+            let pools = self.0.read().await;
+            pools.values().cloned().collect::<Vec<_>>()
+        };
+
+        for pool in pools_to_broadcast {
+            pool.broadcast(packet.clone()).await?;
+        }
+
+        Ok(())
+    }
+
+    // Broadcast to a specific pool
+    pub async fn broadcast_to<P: packet::Packet>(
+        &self,
+        pool_name: &str,
+        packet: P,
+    ) -> Result<(), Error> {
+        let pools = self.0.read().await;
+        if let Some(pool) = pools.get(pool_name) {
+            pool.broadcast(packet).await?;
+            Ok(())
+        } else {
+            Err(Error::Other(format!("Pool {} not found", pool_name)))
+        }
+    }
 }
 
 /// Thread-safe reference to shared resources.
@@ -285,7 +328,7 @@ where
     ///     listener.with_pool("main_pool").await;
     /// }
     /// ```
-    pub async fn with_pool(&self, pool_name: &str) {
+    pub async fn with_pool(&self, pool_name: impl ToString) {
         self.pools
             .write()
             .await
@@ -317,11 +360,14 @@ where
     /// # Panics
     ///
     /// * Panics if the specified pool doesn't exist
-    #[allow(clippy::significant_drop_tightening)]
     pub async fn add_socket_to_pool(&mut self, pool_name: &str, socket: &TSocket<S>) {
-        let mut pool = self.pools.write().await;
-        let pool = pool.get_mut(pool_name).expect("Unknown Pool");
-        pool.add(socket.clone()).await;
+        self.pools
+            .write()
+            .await
+            .get_mut(pool_name)
+            .expect("Unknown Pool")
+            .add(socket.clone())
+            .await;
     }
 
     /// Gets a reference to the connection pools.
@@ -402,7 +448,6 @@ where
     /// # Returns
     ///
     /// * `Result<Option<Encryptor>, Error>` - The encryption configuration or an error
-    #[allow(clippy::significant_drop_in_scrutinee)]
     async fn handle_authentication(
         &mut self,
         tsocket: &mut TSocket<S>,
@@ -445,7 +490,12 @@ where
 
         // Case 3a: Session ID Authentication
         if let Some(id) = body.session_id {
-            if let Some(session) = self.sessions.read().await.get_session(&id) {
+            let session_result = {
+                let sessions = self.sessions.read().await;
+                sessions.get_session(&id).cloned() 
+            }; 
+
+            if let Some(session) = session_result {
                 if session.is_expired() {
                     return Err(Error::ExpriedSessionId(id));
                 }
@@ -509,11 +559,14 @@ where
     ///     listener.broadcast(packet).await.expect("Broadcast failed");
     /// }
     /// ```
-    #[allow(clippy::significant_drop_in_scrutinee)]
     pub async fn broadcast(&self, packet: P) -> Result<(), Error> {
         let pool = self.keep_alive_pool.clone().sockets;
-        for socket in pool.write().await.iter_mut() {
-            socket.send(packet.clone()).await?;
+        {
+            let mut sockets = pool.write().await;
+
+            for socket in sockets.iter_mut() {
+                socket.send(packet.clone()).await?;
+            }
         }
         Ok(())
     }
