@@ -1,3 +1,9 @@
+//! Macros for use with the tnet library.
+//!
+//! This module provides macros that simplify common operations in the tnet library,
+//! making code more concise and easier to maintain.
+//!
+
 /// Creates a wrapped async handler function compatible with the tnet server framework.
 ///
 /// This macro transforms a regular async function into a properly wrapped handler that can be
@@ -45,8 +51,8 @@
 #[macro_export]
 macro_rules! wrap_handler {
     ($func:expr) => {
-        std::sync::Arc::new(move |socket, payload, pools, resources| {
-            Box::pin($func(socket, payload, pools, resources))
+        std::sync::Arc::new(move |sources, packet| {
+            Box::pin($func(sources, packet))
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
         })
     };

@@ -7,21 +7,21 @@ use crate::{
     asynch::{
         authenticator::{AuthType, Authenticator},
         client::{AsyncClient, EncryptionConfig},
-        listener::{AsyncListener, PoolRef, ResourceRef},
+        listener::{AsyncListener, HandlerSources},
     },
     prelude::*,
 };
 use serde::{Deserialize, Serialize};
 
+pub mod reconnection_tests;
+pub mod relay_test;
+pub mod tlisten_tests;
 // Define packet type exactly as in README
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MyPacket {
     header: String,
     body: PacketBody,
 }
-
-
-
 
 impl ImplPacket for MyPacket {
     fn header(&self) -> String {
@@ -106,22 +106,13 @@ impl ImplResource for MyResource {
 // Test the basic server setup from README
 #[tokio::test]
 async fn test_basic_server_setup() {
-    async fn handle_ok(
-        mut socket: TSocket<MySession>,
-        packet: MyPacket,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_ok(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
+        let mut socket = sources.socket;
         println!("Received packet: {:?}", packet);
         socket.send(MyPacket::ok()).await.unwrap();
     }
 
-    async fn handle_error(
-        _socket: TSocket<MySession>,
-        error: Error,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_error(_sources: HandlerSources<MySession, MyResource>, error: Error) {
         println!("Error occurred: {:?}", error);
     }
 
@@ -153,12 +144,8 @@ async fn test_basic_server_setup() {
 async fn test_basic_client_setup() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    async fn handle_ok(
-        mut socket: TSocket<MySession>,
-        packet: MyPacket,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_ok(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
+        let mut socket = sources.socket;
         println!("Server received packet: {:?}", packet);
 
         let mut response = MyPacket::ok();
@@ -172,12 +159,8 @@ async fn test_basic_client_setup() {
         }
     }
 
-    async fn handle_error(
-        mut socket: TSocket<MySession>,
-        error: Error,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_error(sources: HandlerSources<MySession, MyResource>, error: Error) {
+        let mut socket = sources.socket;
         if let Err(e) = socket.send(MyPacket::error(error)).await {
             eprintln!("Failed to send error response: {}", e);
         }
@@ -243,22 +226,12 @@ async fn test_basic_client_setup() {
 #[tokio::test]
 async fn test_full_client_server_communication() {
     // Server setup
-    async fn handle_ok(
-        mut socket: TSocket<MySession>,
-        _packet: MyPacket,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_ok(sources: HandlerSources<MySession, MyResource>, _packet: MyPacket) {
+        let mut socket = sources.socket;
         socket.send(MyPacket::ok()).await.unwrap();
     }
 
-    async fn handle_error(
-        _socket: TSocket<MySession>,
-        _error: Error,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
-    }
+    async fn handle_error(_sources: HandlerSources<MySession, MyResource>, _error: Error) {}
 
     let mut server = AsyncListener::new(
         ("127.0.0.1", 8084),
@@ -292,12 +265,8 @@ async fn test_full_client_server_communication() {
 async fn test_broadcasting() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    async fn handle_ok(
-        mut socket: TSocket<MySession>,
-        packet: MyPacket,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_ok(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
+        let mut socket = sources.socket;
         println!("Server received packet: {:?}", packet);
 
         let mut response = MyPacket::ok();
@@ -311,12 +280,8 @@ async fn test_broadcasting() {
         }
     }
 
-    async fn handle_error(
-        mut socket: TSocket<MySession>,
-        error: Error,
-        _pools: PoolRef<MySession>,
-        _resources: ResourceRef<MyResource>,
-    ) {
+    async fn handle_error(sources: HandlerSources<MySession, MyResource>, error: Error) {
+        let mut socket = sources.socket;
         if let Err(e) = socket.send(MyPacket::error(error)).await {
             eprintln!("Failed to send error response: {}", e);
         }

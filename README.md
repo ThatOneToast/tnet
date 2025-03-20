@@ -7,6 +7,7 @@ A robust async TCP networking library for Rust that provides:
 - Keep-alive mechanisms
 - Broadcast capabilities
 - Automatic reconnection
+- Relay/proxy functionality
 
 
 ## Features
@@ -18,6 +19,9 @@ A robust async TCP networking library for Rust that provides:
 - 📢 **Broadcasting** - Send messages to multiple clients
 - 🔌 **Reconnection** - Resilient connections with automatic reconnection and exponential backoff
 - 🚀 **Async/Await** - Built on tokio for high performance
+- 🌐 **Relay/Proxy** - Network traffic relay with the phantom client/server system
+- 🎯 **Attribute Macros** - Easy handler registration with the `#[tlisten_for("PACKET_TYPE")]` macro
+- 🏷️ **Derive Macros** - Generate packet header types with `#[derive(PacketHeader)]`
 
 
 ## Example Usage
@@ -116,28 +120,51 @@ impl ImplResource for MyResource {
     }
 }
 
+// Define packet handlers with the tlisten_for attribute macro
+#[tlisten_for("LOGIN")]
+async fn handle_login(
+    sources: HandlerSources<MySession, MyResource>,
+    packet: MyPacket
+) {
+    let mut socket = sources.socket;
+    println!("Processing login request");
+    
+    // Access resources if needed
+    let mut resources = sources.resources.write().await;
+    resources.data.push("Login processed".to_string());
+    
+    // Send response
+    socket.send(MyPacket::ok()).await.unwrap();
+}
+
+#[tlisten_for("LOGOUT")]
+async fn handle_logout(
+    sources: HandlerSources<MySession, MyResource>,
+    packet: MyPacket
+) {
+    let mut socket = sources.socket;
+    println!("Processing logout request");
+    socket.send(MyPacket::ok()).await.unwrap();
+}
+
+// For packets without specific handlers, we use these default handlers
+async fn handle_ok(
+    sources: HandlerSources<MySession, MyResource>,
+    packet: MyPacket
+) {
+    println!("Received packet: {:?}", packet);
+    sources.socket.send(MyPacket::ok()).await.unwrap();
+}
+
+async fn handle_error(
+    sources: HandlerSources<MySession, MyResource>,
+    error: Error
+) {
+    println!("Error occurred: {:?}", error);
+}
+
 #[tokio::main]
 async fn main() {
-    // Define handlers
-    async fn handle_ok(
-        socket: TSocket<MySession>,
-        packet: MyPacket,
-        pools: PoolRef<MySession>,
-        resources: ResourceRef<MyResource>
-    ) {
-        println!("Received packet: {:?}", packet);
-        socket.send(MyPacket::ok()).await.unwrap();
-    }
-
-    async fn handle_error(
-        socket: TSocket<MySession>,
-        error: Error,
-        pools: PoolRef<MySession>,
-        resources: ResourceRef<MyResource>
-    ) {
-        println!("Error occurred: {:?}", error);
-    }
-
     // Create and configure server
     let server = AsyncListener::new(
         ("127.0.0.1", 8080),
@@ -156,6 +183,9 @@ async fn main() {
                 }
             }))
     );
+
+    // Create connection pools if needed
+    server.with_pool("authenticated").await;
 
     // Run the server
     server.run().await;
@@ -186,10 +216,51 @@ async fn main() {
     // Send a packet and get response
     let response = client.send_recv(MyPacket::ok()).await.unwrap();
     println!("Server response: {:?}", response);
+    
+    // Send a login packet
+    let mut login_packet = MyPacket::ok();
+    login_packet.header = "LOGIN".to_string();
+    let login_response = client.send_recv(login_packet).await.unwrap();
+    println!("Login response: {:?}", login_response);
 }
 ```
 
 ## Advanced Usage
+
+### Packet Header Enum with Derive Macro
+
+```rust
+use tnet::prelude::*;
+
+// Define packet headers as an enum
+#[derive(Debug, Clone, PacketHeader)]
+enum MyHeaders {
+    Login,
+    Logout,
+    Message,
+    KeepAlive,
+    Error,
+    Ok,
+}
+
+// Now you can use MyHeaders with automatic string conversion
+#[tlisten_for("Login")]
+async fn handle_login(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
+    // Login logic here
+    
+    // The enum provides automatic string conversion
+    let response_header = MyHeaders::Ok.to_string();
+    let mut response = MyPacket::ok();
+    response.header = response_header;
+    
+    sources.socket.send(response).await.unwrap();
+}
+
+// Parse strings to enum values
+fn process_header(header_str: &str) -> Result<MyHeaders, String> {
+    header_str.parse::<MyHeaders>()
+}
+```
 
 ### Auto-Reconnection
 
@@ -284,6 +355,55 @@ match client.send_recv(MyPacket::ok()).await {
             println!("Connection lost and could not be restored: {}", e);
         }
     }
+}
+```
+
+### Network Relay/Proxy with PhantomClient and PhantomListener
+
+The phantom system allows relaying packets through an intermediary server:
+
+```rust
+// 1. Set up a phantom listener (relay server)
+let phantom_listener = PhantomListener::new(Some(("127.0.0.1".to_string(), 9090))).await;
+
+// 2. Create a client config for the destination server
+let client_config = ClientConfig {
+    encryption_config: EncryptionConfig::default_on(),
+    server_addr: "destination.server.com".to_string(),
+    server_port: 8080,
+    user: Some("user".to_string()),
+    pass: Some("pass".to_string()),
+};
+
+// 3. Create a phantom configuration 
+let phantom_conf = PhantomConf {
+    header: "relay",
+    username: Some("user"),
+    password: Some("pass"),
+    server_addr: "destination.server.com",
+    server_port: 8080,
+    enc_conf: EncryptionConfig::default_on(),
+};
+
+// 4. Create a packet to send to the destination
+let packet_to_relay = MyPacket::ok();
+
+// 5. Create a phantom packet that wraps the real packet
+let phantom_packet = PhantomPacket::produce_from_conf(&phantom_conf, &packet_to_relay);
+
+// 6. Connect to the phantom server and send the relay request
+let mut client = AsyncClient::<PhantomPacket>::new("127.0.0.1", 9090)
+    .await
+    .unwrap();
+
+// 7. Send and get response
+let relay_response = client.send_recv(phantom_packet).await.unwrap();
+
+// 8. Extract the response from the destination server
+if let Some(response_data) = relay_response.recv_packet {
+    // Parse the response from the destination
+    let destination_response: MyPacket = serde_json::from_str(&response_data).unwrap();
+    println!("Response from destination: {:?}", destination_response);
 }
 ```
 

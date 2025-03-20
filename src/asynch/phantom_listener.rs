@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     errors::Error,
     phantom::PhantomPacket,
-    prelude::{AsyncListener, PoolRef, ResourceRef},
+    prelude::AsyncListener,
     resources::Resource,
     session::Session,
     wrap_handler,
 };
 
-use super::{phantom_client::AsyncPhantomClient, socket::TSocket};
+use super::{listener::HandlerSources, phantom_client::AsyncPhantomClient};
 
 /// `PhantomSession` represents a session in the phantom network protocol.
 ///
@@ -103,12 +103,11 @@ pub struct PhantomListener {
 }
 
 async fn ok(
-    mut socket: TSocket<PhantomSession>,
+    sources: HandlerSources<PhantomSession, PhantomResources>,
     packet: PhantomPacket,
-    _pools: PoolRef<PhantomSession>,
-    _resources: ResourceRef<PhantomResources>,
 ) {
     println!("Phantom listener received packet: {:?}", packet);
+    let mut socket = sources.socket;
 
     if packet.header.as_str() == "relay" {
         let sent_packet = match &packet.sent_packet {
@@ -218,11 +217,10 @@ async fn ok(
 }
 
 async fn bad(
-    mut socket: TSocket<PhantomSession>,
+    sources: HandlerSources<PhantomSession, PhantomResources>,
     error: Error,
-    _pools: PoolRef<PhantomSession>,
-    _resources: ResourceRef<PhantomResources>,
 ) {
+    let mut socket = sources.socket;
     eprintln!("Error in phantom listener: {error}");
     let _ = socket.send(PhantomPacket::error(error)).await;
 }

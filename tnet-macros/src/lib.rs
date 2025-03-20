@@ -1,6 +1,9 @@
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{Data, DataEnum, DeriveInput, Fields, parse_macro_input};
+use quote::{format_ident, quote};
+use syn::{Data, DataEnum, DeriveInput, Fields, ItemFn, LitStr, parse_macro_input};
+
+#[cfg(test)]
+mod tests;
 
 /// Automatically implements string conversion traits for an enum.
 ///
@@ -8,7 +11,7 @@ use syn::{Data, DataEnum, DeriveInput, Fields, parse_macro_input};
 ///
 /// - `std::fmt::Display`: Enables `.to_string()` on enum values
 /// - `std::str::FromStr`: Enables string parsing via `.parse()`
-/// - `From<&str>`: Enables conversion from string slices 
+/// - `From<&str>`: Enables conversion from string slices
 /// - `From<String>`: Enables conversion from owned strings
 ///
 /// # How It Works
@@ -160,4 +163,202 @@ pub fn packet_header_derive(input: TokenStream) -> TokenStream {
 
     // Return the generated implementation
     expanded.into()
+}
+
+/// Registers a function as a packet handler for a specific packet type.
+///
+/// This attribute macro allows you to define handler functions for specific packet types
+/// without manually registering them. The macro automatically registers the function
+/// with the global handler registry during application initialization.
+///
+/// # Arguments
+///
+/// * A string literal representing the packet type (packet header) this function handles
+///
+/// # Handler Function Requirements
+///
+/// The function must have the following signature:
+///
+/// ```
+/// async fn handler_name(
+///     sources: HandlerSources<YourSessionType, YourResourceType>,
+///     packet: YourPacketType
+/// ) {
+///     // Handler implementation
+/// }
+/// ```
+///
+/// Where:
+/// * `HandlerSources` contains the socket, connection pools, and resources
+/// * `YourSessionType` implements the `Session` trait
+/// * `YourResourceType` implements the `Resource` trait
+/// * `YourPacketType` implements the `Packet` trait
+///
+/// # How It Works
+///
+/// When the application starts up, all functions with this attribute will be registered in
+/// the global handler registry. When a packet with the specified header is received, the
+/// `AsyncListener` will look up the appropriate handler in the registry and dispatch the
+/// packet to it.
+///
+/// If no handler is found for a packet type, the default handler passed to `AsyncListener::new()`
+/// will be used.
+///
+/// # Type Safety
+///
+/// The macro ensures type safety by preserving the generic type parameters of your handler.
+/// This means you can have different handlers for the same packet header but with different
+/// session, resource, or packet types - they will be properly distinguished at runtime.
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::prelude::*;
+///
+/// // Define packet, session, and resource types
+/// struct MyPacket { /* ... */ }
+/// struct MySession { /* ... */ }
+/// struct MyResource { /* ... */ }
+///
+/// #[tlisten_for("LOGIN")]
+/// async fn handle_login(
+///     sources: HandlerSources<MySession, MyResource>,
+///     packet: MyPacket
+/// ) {
+///     let mut socket = sources.socket;
+///     println!("Handling login packet");
+///
+///     // Process login logic
+///     // ...
+///
+///     // Send response
+///     socket.send(MyPacket::ok()).await.unwrap();
+/// }
+///
+/// #[tlisten_for("CHAT")]
+/// async fn handle_chat(
+///     sources: HandlerSources<MySession, MyResource>,
+///     packet: MyPacket
+/// ) {
+///     let mut socket = sources.socket;
+///     let pools = sources.pools;
+///
+///     // Process chat message
+///     // ...
+///
+///     // Broadcast to other users
+///     pools.broadcast_to("chat_room", packet.clone()).await.unwrap();
+/// }
+/// ```
+///
+/// # Multiple Handlers for the Same Packet Type
+///
+/// You can register multiple handlers for the same packet type. The first one registered
+/// will be used:
+///
+/// ```rust
+/// // This handler will be used for regular users
+/// #[tlisten_for("ADMIN_COMMAND")]
+/// async fn handle_admin_command_for_regular_users(
+///     sources: HandlerSources<RegularUserSession, MyResource>,
+///     packet: MyPacket
+/// ) {
+///     // Deny access for regular users
+///     sources.socket.send(MyPacket::error(Error::AccessDenied)).await.unwrap();
+/// }
+///
+/// // This handler will be used for admin users
+/// #[tlisten_for("ADMIN_COMMAND")]
+/// async fn handle_admin_command_for_admins(
+///     sources: HandlerSources<AdminUserSession, MyResource>,
+///     packet: MyPacket
+/// ) {
+///     // Process admin command
+///     // ...
+/// }
+/// ```
+///
+/// # Combining with Packet Header Enums
+///
+/// For better type safety, you can use this macro with the `PacketHeader` derive macro:
+///
+/// ```rust
+/// #[derive(Debug, Clone, PacketHeader)]
+/// enum MyHeaders {
+///     Login,
+///     Chat,
+///     Logout,
+/// }
+///
+/// #[tlisten_for("Login")]
+/// async fn handle_login(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
+///     // Login handling logic
+/// }
+///
+/// #[tlisten_for("Chat")]
+/// async fn handle_chat(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
+///     // Chat handling logic
+/// }
+///
+/// // In your packet implementation:
+/// impl Packet for MyPacket {
+///     fn header(&self) -> String {
+///         self.header.to_string() // This will match what's in the tlisten_for attribute
+///     }
+///     // ... other implementations
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// - The handler function must be `async`
+/// - The handler function must be accessible where it's used (public or in the same module)
+/// - The handler must accept exactly two parameters: `HandlerSources` and a packet type
+/// - The packet header string is case-sensitive and must match exactly what's returned by `Packet::header()`
+#[proc_macro_attribute]
+pub fn tlisten_for(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let packet_type = parse_macro_input!(attr as LitStr).value();
+    let input_fn = parse_macro_input!(item as ItemFn);
+    let fn_name = &input_fn.sig.ident;
+
+    // Generate a unique registration function name
+    let register_fn_name = format_ident!("__tnet_register_{}", fn_name);
+
+    // Extract the function's path for clarity in logs
+    let fn_path = format!("{}::{}", module_path!(), fn_name);
+
+    let expanded = quote! {
+        // Keep the original function
+        #input_fn
+
+        // Create a unique module to avoid name conflicts
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        mod #register_fn_name {
+            use super::*;
+            use std::sync::OnceLock;
+
+            // Using OnceLock for initialization
+            static REGISTER: OnceLock<()> = OnceLock::new();
+
+            #[ctor::ctor]
+            fn register() {
+                let _ = REGISTER.get_or_init(|| {
+                    // Only register once
+                    tnet::handler_registry::register_handler(
+                        #packet_type,
+                        |sources, packet| Box::pin(super::#fn_name(sources, packet))
+                    );
+
+                    // Optional: Log registration for debugging
+                    #[cfg(debug_assertions)]
+                    println!("Registered handler for {} at {}", #packet_type, #fn_path);
+
+                    ()
+                });
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
 }

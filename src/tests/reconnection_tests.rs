@@ -4,7 +4,7 @@ use tokio::time::sleep;
 use crate::{
     asynch::{
         client::{AsyncClient, ReconnectionConfig},
-        listener::{AsyncListener, PoolRef, ResourceRef},
+        listener::{AsyncListener, HandlerSources},
     },
     errors::Error,
     packet::{Packet, PacketBody},
@@ -108,11 +108,10 @@ impl ImplResource for TestResource {
 
 // Handler functions for the server
 async fn handle_ok(
-    mut socket: TSocket<TestSession>,
+    sources: HandlerSources<TestSession, TestResource>,
     packet: TestPacket,
-    _pools: PoolRef<TestSession>,
-    _resources: ResourceRef<TestResource>,
 ) {
+    let mut socket = sources.socket;
     println!("Server received packet: {:?}", packet);
 
     let mut response = TestPacket::ok();
@@ -132,13 +131,11 @@ async fn handle_ok(
 }
 
 async fn handle_error(
-    mut socket: TSocket<TestSession>,
+    sources: HandlerSources<TestSession, TestResource>,
     error: Error,
-    _pools: PoolRef<TestSession>,
-    _resources: ResourceRef<TestResource>,
 ) {
     println!("Server received error: {:?}", error);
-
+    let mut socket = sources.socket;
     let _ = socket.send(TestPacket::error(error)).await;
 }
 

@@ -10,7 +10,7 @@ use tokio::{
 use crate::{
     encrypt::{Encryptor, KeyExchange},
     errors::Error,
-    packet, resources,
+    handler_registry, packet, resources,
     session::{self, Sessions},
 };
 
@@ -19,6 +19,45 @@ use super::{
     client::EncryptionConfig,
     socket::{TSocket, TSockets},
 };
+
+/// A collection of resources provided to packet handlers.
+///
+/// `HandlerSources` bundles together the socket connection, connection pools,
+/// and application resources needed by packet handler functions. This abstraction
+/// simplifies handler function signatures and provides all the necessary context
+/// for processing network events.
+///
+/// # Type Parameters
+///
+/// * `S` - The session type implementing the `Session` trait
+/// * `R` - The resource type implementing the `Resource` trait
+///
+/// # Examples
+///
+/// ```
+/// async fn handle_login_packet(sources: HandlerSources<MySession, MyResource>, packet: LoginPacket) {
+///     let socket = sources.socket;
+///     let pools = sources.pools;
+///     let resources = sources.resources;
+///
+///     // Process login and respond
+///     let response = LoginResponse::new(true);
+///     socket.send(response).await.expect("Failed to send response");
+///
+///     // Add to appropriate connection pool
+///     pools.insert("authenticated", &socket).await;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct HandlerSources<S, R>
+where
+    S: crate::session::Session,
+    R: crate::resources::Resource,
+{
+    pub socket: TSocket<S>,
+    pub pools: PoolRef<S>,
+    pub resources: ResourceRef<R>,
+}
 
 /// Type alias for the success handler function in the async listener.
 ///
@@ -31,7 +70,7 @@ use super::{
 /// * `S` - The session type implementing the `Session` trait
 /// * `R` - The resource type implementing the `Resource` trait
 pub type AsyncListenerOkHandler<P, S, R> =
-    Arc<dyn Fn(TSocket<S>, P, PoolRef<S>, ResourceRef<R>) -> BoxFuture<'static, ()> + Send + Sync>;
+    Arc<dyn Fn(HandlerSources<S, R>, P) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// Type alias for the error handler function in the async listener.
 ///
@@ -42,9 +81,8 @@ pub type AsyncListenerOkHandler<P, S, R> =
 ///
 /// * `S` - The session type implementing the `Session` trait
 /// * `R` - The resource type implementing the `Resource` trait
-pub type AsyncListenerErrorHandler<S, R> = Arc<
-    dyn Fn(TSocket<S>, Error, PoolRef<S>, ResourceRef<R>) -> BoxFuture<'static, ()> + Send + Sync,
->;
+pub type AsyncListenerErrorHandler<S, R> =
+    Arc<dyn Fn(HandlerSources<S, R>, Error) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// Thread-safe reference to a pool of socket connections.
 ///
@@ -263,6 +301,25 @@ where
             resources: ResourceRef::new(R::new()),
             _packet: PhantomData,
         }
+    }
+
+    /// Registers a handler for a specific packet type.
+    ///
+    /// # Arguments
+    ///
+    /// * `packet_type` - The packet type string that triggers this handler
+    /// * `handler` - The handler function to register
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - The configured listener instance
+    #[must_use]
+    pub fn with_handler(self, packet_type: &str, handler: AsyncListenerOkHandler<P, S, R>) -> Self {
+        crate::handler_registry::register_handler(packet_type, move |sources, packet| {
+            handler(sources, packet)
+        });
+
+        self
     }
 
     /// Configures encryption settings for the listener.
@@ -492,8 +549,8 @@ where
         if let Some(id) = body.session_id {
             let session_result = {
                 let sessions = self.sessions.read().await;
-                sessions.get_session(&id).cloned() 
-            }; 
+                sessions.get_session(&id).cloned()
+            };
 
             if let Some(session) = session_result {
                 if session.is_expired() {
@@ -616,7 +673,12 @@ where
             let auth_resp = self.handle_authentication(&mut tsocket).await;
 
             if let Err(e) = auth_resp {
-                error_handler(tsocket, e, PoolRef(pools.clone()), resources.clone()).await;
+                let sources = HandlerSources {
+                    socket: tsocket,
+                    pools: PoolRef(pools.clone()),
+                    resources: resources.clone(),
+                };
+                error_handler(sources, e).await;
             } else {
                 tokio::spawn(async move {
                     loop {
@@ -627,13 +689,12 @@ where
                                 println!("Client disconnected.");
                                 break;
                             }
-                            error_handler(
-                                tsocket.clone(),
-                                e.to_owned(),
-                                PoolRef(pools.clone()),
-                                resources.clone(),
-                            )
-                            .await;
+                            let sources = HandlerSources {
+                                socket: tsocket.clone(),
+                                pools: PoolRef(pools.clone()),
+                                resources: resources.clone(),
+                            };
+                            error_handler(sources, e.to_owned()).await;
                         }
 
                         let packet = resp.unwrap();
@@ -655,13 +716,25 @@ where
                                 }
                             }
                         } else {
-                            ok_handler(
-                                tsocket.clone(),
-                                packet,
-                                PoolRef(pools.clone()),
-                                resources.clone(),
-                            )
-                            .await;
+                            let sources = HandlerSources {
+                                socket: tsocket.clone(),
+                                pools: PoolRef(pools.clone()),
+                                resources: resources.clone(),
+                            };
+
+                            // Get all handlers for this packet type
+                            let handlers =
+                                handler_registry::get_handlers::<P, S, R>(&packet.header());
+
+                            if !handlers.is_empty() {
+                                // Run all handlers for this packet type
+                                for handler in handlers {
+                                    handler(sources.clone(), packet.clone()).await;
+                                }
+                            } else {
+                                // Fall back to default handler if no registered handlers
+                                ok_handler(sources, packet).await;
+                            }
                         }
                     }
                 });

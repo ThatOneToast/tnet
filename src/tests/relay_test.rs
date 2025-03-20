@@ -4,7 +4,7 @@ use crate::{
     asynch::{
         authenticator::{AuthType, Authenticator},
         client::EncryptionConfig,
-        listener::{AsyncListener, PoolRef, ResourceRef},
+        listener::{AsyncListener, HandlerSources},
         phantom_client::AsyncPhantomClient,
         phantom_listener::{PhantomListener, PhantomResources, PhantomSession},
     },
@@ -62,12 +62,8 @@ impl Packet for TestPacket {
     }
 }
 
-async fn handle_ok(
-    mut socket: TSocket<PhantomSession>,
-    packet: TestPacket,
-    _pools: PoolRef<PhantomSession>,
-    _resources: ResourceRef<PhantomResources>,
-) {
+async fn handle_ok(sources: HandlerSources<PhantomSession, PhantomResources>, packet: TestPacket) {
+    let mut socket = sources.socket;
     println!("Endpoint server received packet: {:?}", packet);
 
     // Return the data from the packet in the response, handling "TEST" packets specially
@@ -89,12 +85,8 @@ async fn handle_ok(
     }
 }
 
-async fn handle_error(
-    mut socket: TSocket<PhantomSession>,
-    error: Error,
-    _pools: PoolRef<PhantomSession>,
-    _resources: ResourceRef<PhantomResources>,
-) {
+async fn handle_error(sources: HandlerSources<PhantomSession, PhantomResources>, error: Error) {
+    let mut socket = sources.socket;
     println!("Endpoint server error: {:?}", error);
     if let Err(e) = socket.send(TestPacket::error(error)).await {
         eprintln!("Failed to send error response: {}", e);

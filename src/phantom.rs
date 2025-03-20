@@ -1,3 +1,9 @@
+//! Types and utilities for the phantom relay system.
+//!
+//! The phantom system enables network traffic relay through an intermediary server,
+//! allowing clients to communicate with servers they might not be able to reach directly.
+//! This is useful for creating proxies, gateways, and other intermediary network components.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -6,10 +12,38 @@ use crate::{
     prelude::EncryptionConfig,
 };
 
-/// A const allowable struct for holding a ClientConfig for PhantomClients.
+/// Configuration for phantom relay operations in a const context.
 ///
-/// PhantomConf can be used on a `ClientConfig::from(PhantomConf)` to generate a ClientConfig
-/// The header is ignored during the transfer process, as ClientConfig just stores endpoint information.
+/// `PhantomConf` provides a way to define relay configuration with string literals
+/// and other const-compatible types. It can be converted to a `ClientConfig` for use
+/// with the phantom client system.
+///
+/// # Fields
+///
+/// * `header` - The packet header for relay operations
+/// * `username` - Optional username for authentication
+/// * `password` - Optional password for authentication
+/// * `server_addr` - The target server address
+/// * `server_port` - The target server port
+/// * `enc_conf` - Encryption configuration for the connection
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::prelude::*;
+///
+/// let phantom_conf = PhantomConf {
+///     header: "relay",
+///     username: Some("user"),
+///     password: Some("pass"),
+///     server_addr: "target.server.com",
+///     server_port: 8080,
+///     enc_conf: EncryptionConfig::default_on(),
+/// };
+///
+/// // Convert to ClientConfig
+/// let client_config = ClientConfig::from(&phantom_conf);
+/// ```
 #[derive(Debug, Clone)]
 pub struct PhantomConf<'a> {
     pub header: &'a str,
@@ -33,6 +67,33 @@ impl<'a> From<&'a ClientConfig> for PhantomConf<'a> {
     }
 }
 
+/// Configuration for a phantom client connection.
+///
+/// `ClientConfig` contains all the information needed for a phantom client to
+/// connect to a target server. It is typically embedded in a `PhantomPacket`
+/// to instruct a phantom server where to relay the packet.
+///
+/// # Fields
+///
+/// * `encryption_config` - Encryption settings for the connection
+/// * `server_addr` - The target server address
+/// * `server_port` - The target server port
+/// * `user` - Optional username for authentication
+/// * `pass` - Optional password for authentication
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::prelude::*;
+///
+/// let client_config = ClientConfig {
+///     encryption_config: EncryptionConfig::default_on(),
+///     server_addr: "target.server.com".to_string(),
+///     server_port: 8080,
+///     user: Some("username".to_string()),
+///     pass: Some("password".to_string()),
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     pub encryption_config: EncryptionConfig,
@@ -54,6 +115,48 @@ impl From<&PhantomConf<'_>> for ClientConfig {
     }
 }
 
+/// Packet type used for relay operations in the phantom system.
+///
+/// `PhantomPacket` encapsulates a serialized packet and routing information for
+/// relay operations. It is used to transport packets between a client, phantom server,
+/// and target server.
+///
+/// # Fields
+///
+/// * `header` - The packet header
+/// * `body` - The packet body
+/// * `sent_packet` - Optional serialized packet to be sent to the target server
+/// * `recv_packet` - Optional serialized response from the target server
+/// * `client_config` - Optional configuration for connecting to the target server
+///
+/// # Example
+///
+/// ```rust
+/// use tnet::prelude::*;
+/// use serde::{Serialize, Deserialize};
+///
+/// // Define a packet type to be relayed
+/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// struct MyPacket {
+///     message: String
+/// }
+///
+/// // Create phantom configuration
+/// let conf = PhantomConf {
+///     header: "relay",
+///     username: Some("user"),
+///     password: Some("pass"),
+///     server_addr: "target.com",
+///     server_port: 8080,
+///     enc_conf: EncryptionConfig::default(),
+/// };
+///
+/// // Create the packet to relay
+/// let my_packet = MyPacket { message: "Hello".to_string() };
+///
+/// // Produce a phantom packet with the configuration and underlying packet
+/// let phantom_packet = PhantomPacket::produce_from_conf(&conf, &my_packet);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhantomPacket {
     pub header: String,
@@ -64,7 +167,23 @@ pub struct PhantomPacket {
 }
 
 impl PhantomPacket {
-    /// Produces a `PhantomPacket` from the given configuration and underlying packet.
+    /// Creates a `PhantomPacket` from configuration and an underlying packet.
+    ///
+    /// This method serializes the provided packet and packages it with the
+    /// connection configuration for relay operations.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `A` - Any type that implements `Serialize`
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The phantom configuration
+    /// * `underlying_packet` - The packet to be relayed
+    ///
+    /// # Returns
+    ///
+    /// * A new `PhantomPacket` instance
     ///
     /// # Panics
     ///
@@ -81,6 +200,11 @@ impl PhantomPacket {
         }
     }
 
+    /// Creates a new response packet for relay operations.
+    ///
+    /// # Returns
+    ///
+    /// * A new `PhantomPacket` configured for relay responses
     #[must_use]
     pub fn response() -> Self {
         Self {
@@ -88,11 +212,29 @@ impl PhantomPacket {
             ..Default::default()
         }
     }
-    
+
+    /// Deserializes the received packet string into the specified type.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The packet type to deserialize into
+    ///
+    /// # Returns
+    ///
+    /// * `Option<T>` - The deserialized packet or None if deserialization fails
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// // Assuming a PhantomPacket with a response from the target server
+    /// if let Some(response) = phantom_packet.cast_recv_packet::<MyPacket>() {
+    ///     println!("Received response: {:?}", response);
+    /// }
+    /// ```
     pub fn cast_recv_packet<T: Packet>(&self) -> Option<T> {
-        self.recv_packet.as_ref().and_then(|packet_str| {
-            serde_json::from_str::<T>(packet_str).ok()
-        })
+        self.recv_packet
+            .as_ref()
+            .and_then(|packet_str| serde_json::from_str::<T>(packet_str).ok())
     }
 }
 
