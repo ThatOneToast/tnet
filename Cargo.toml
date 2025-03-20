@@ -26,5 +26,5 @@ uuid = { version = "1", features = ["v4"] }
 scopeguard = "1.2.0"
 
 tcrypt = { version = "0.1.2" }
-tnet-macros = { path = "./tnet-macros" }
+tnet-macros = { version = "0.1.0", path = "./tnet-macros" }
 
