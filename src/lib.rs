@@ -5,6 +5,9 @@
 #![warn(clippy::correctness)]
 #![warn(clippy::cargo)]
 
+
+#![allow(clippy::multiple_crate_versions)]
+
 //! # `TNet`
 //!
 //! A networking library providing async TCP client/server functionality with:

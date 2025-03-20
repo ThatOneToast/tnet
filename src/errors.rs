@@ -26,12 +26,27 @@ pub enum Error {
     #[error("Encryption error: {0}")]
     EncryptionError(String),
 
-    #[error("Error: {0}")]
-    Other(String),
+    #[error("Session ID is required for a keep alive session")]
+    KeepAliveNoSessionId,
 
     #[error("Invalid Client Config")]
     InvalidClientConfig,
 
     #[error("Invalid Client Config - There was none")]
     UnwrappedInvalidClientConfig,
+    
+    #[error("Invalid pool {0}")]
+    InvalidPool(String),        
+    
+    #[error("Failed to send packet {0}")]
+    FailedPacketSend(String),
+    
+    #[error("Failed to read packet {0}")]
+    FailedPacketRead(String),
+    
+    #[error("Broadcast: {0}")]
+    Broadcast(String),
+    
+    #[error("{0}")]
+    Error(String),
 }

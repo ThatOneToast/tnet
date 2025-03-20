@@ -116,7 +116,7 @@ impl<S: session::Session> PoolRef<S> {
             pool.broadcast(packet).await?;
             Ok(())
         } else {
-            Err(Error::Other(format!("Pool {} not found", pool_name)))
+            Err(Error::InvalidPool(pool_name.to_string()))
         }
     }
 }

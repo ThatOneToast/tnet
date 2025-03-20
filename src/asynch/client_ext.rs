@@ -34,10 +34,10 @@ impl<P: packet::Packet> AsyncClientRef<P> {
             // Send the reconnect signal
             match tx_clone.send(()).await {
                 Ok(()) => Ok(()),
-                Err(_) => Err(Error::Other("Failed to signal reconnection".to_string())),
+                Err(_) => Err(Error::Error("Failed to signal reconnection".to_string())),
             }
         } else {
-            Err(Error::Other(
+            Err(Error::Error(
                 "Keepalive reconnection channel not available".to_string(),
             ))
         }

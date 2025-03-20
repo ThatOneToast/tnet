@@ -431,7 +431,7 @@ impl AsyncPhantomClient {
             .writer_tx
             .send(ClientMessage::Data(data))
             .await
-            .map_err(|e| Error::Other(e.to_string()))?;
+            .map_err(|e| Error::FailedPacketSend(e.to_string()))?;
         Ok(())
     }
 
@@ -526,7 +526,7 @@ impl AsyncPhantomClient {
         let session_id = self
             .session_id
             .clone()
-            .ok_or_else(|| Error::Other("Cannot start keepalive without session ID".to_string()))?;
+            .ok_or(Error::KeepAliveNoSessionId)?;
 
         let interval = self.keep_alive.interval;
         let encryption = self.encryption.clone();
@@ -615,7 +615,7 @@ impl AsyncPhantomClient {
             .writer_tx
             .send(ClientMessage::Data(data))
             .await
-            .map_err(|e| Error::Other(e.to_string()))
+            .map_err(|e| Error::FailedPacketSend(e.to_string()))
     }
 
     /// Receives raw data from the server.
@@ -640,7 +640,7 @@ impl AsyncPhantomClient {
         {
             Ok(Some(data)) => data,
             Ok(None) => return Err(Error::ConnectionClosed),
-            Err(_) => return Err(Error::Other("Timeout waiting for response".to_string())),
+            Err(_) => return Err(Error::FailedPacketRead("Timeout waiting for response".to_string())),
         };
 
         // For debugging

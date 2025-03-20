@@ -12,6 +12,9 @@ pub use crate::{
     phantom::{ClientConfig, PhantomConf, PhantomPacket},
 };
 
+pub use tnet_macros::PacketHeader;
+pub use std::str::FromStr;
+
 pub use crate::encrypt::{Encryptor, KeyExchange};
 pub use crate::errors::Error;
 pub use crate::packet::{Packet as ImplPacket, PacketBody};
@@ -19,7 +22,6 @@ pub use crate::resources::Resource as ImplResource;
 pub use crate::session::{Session as ImplSession, Sessions};
 pub use crate::wrap_handler;
 
-// Common external types that are frequently used
 pub use futures::future::BoxFuture;
 pub use serde::{Deserialize, Serialize};
 pub use serde::de::DeserializeOwned;

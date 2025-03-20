@@ -48,7 +48,7 @@ impl Packet for TestPacket {
     fn error(error: Error) -> Self {
         Self {
             header: "ERROR".to_string(),
-            body: PacketBody::with_error_string(&error.to_string()),
+            body: PacketBody::with_error_string(error.to_string()),
             data: None,
         }
     }

@@ -494,7 +494,7 @@ where
 
                     Ok(())
                 } else {
-                    Err(Error::Other("Initialization failed".to_string()))
+                    Err(Error::Error("Initialization failed".to_string()))
                 }
             }
             Err(e) => Err(e),
@@ -859,7 +859,7 @@ where
             .writer_tx
             .send(ClientMessage::Data(data))
             .await
-            .map_err(|e| Error::Other(e.to_string()))?;
+            .map_err(|e| Error::FailedPacketSend(e.to_string()))?;
 
         tokio::time::sleep(Duration::from_nanos(750)).await;
 

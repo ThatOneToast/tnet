@@ -116,7 +116,7 @@ async fn ok(
             None => {
                 println!("No packet to relay - sending error response");
                 socket
-                    .send(PhantomPacket::error(Error::Other(
+                    .send(PhantomPacket::error(Error::Error(
                         "No packet to relay".to_string(),
                     )))
                     .await

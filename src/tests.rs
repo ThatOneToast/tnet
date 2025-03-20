@@ -20,6 +20,9 @@ struct MyPacket {
     body: PacketBody,
 }
 
+
+
+
 impl ImplPacket for MyPacket {
     fn header(&self) -> String {
         self.header.clone()
@@ -43,7 +46,7 @@ impl ImplPacket for MyPacket {
     fn error(error: Error) -> Self {
         Self {
             header: "ERROR".to_string(),
-            body: PacketBody::with_error_string(&error.to_string()),
+            body: PacketBody::with_error_string(error.to_string()),
         }
     }
 

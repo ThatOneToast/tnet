@@ -141,7 +141,7 @@ where
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(Error::Other(format!("Broadcast errors: {:?}", errors)))
+            Err(Error::Broadcast(format!("Broadcast errors: {:?}", errors)))
         }
     }
 }
@@ -437,7 +437,7 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>) {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(Error::Other(format!(
+            Err(Error::Broadcast(format!(
                 "Tuple broadcast errors: {:?}",
                 errors
             )))
@@ -462,7 +462,7 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(Error::Other(format!(
+            Err(Error::Broadcast(format!(
                 "Triple tuple broadcast errors: {:?}",
                 errors
             )))

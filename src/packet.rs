@@ -74,7 +74,7 @@ impl PacketBody {
     ///
     /// * A new `PacketBody` instance with the specified error message
     #[must_use]
-    pub fn with_error_string(string: &str) -> Self {
+    pub fn with_error_string(string: impl ToString) -> Self {
         Self {
             error_string: Some(string.to_string()),
             ..Default::default()
