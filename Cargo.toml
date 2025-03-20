@@ -3,10 +3,10 @@ name = "tnet"
 version = "1.0.3"
 edition = "2024"
 description = "Async TCP networking library with encryption and session management"
-keywords = ["networking", "async", "tcp", "encryption"]
+keywords = ["networking", "async", "encryption"]
 categories = ["network-programming", "asynchronous"]
 license = "MIT"
-repository = "https://github.com/thatonetoast/tnet"
+repository = "https://github.com/ThatOneToast/tnet"
 
 [lib]
 name = "tnet"
@@ -25,6 +25,6 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 scopeguard = "1.2.0"
 
-tcrypt = { git = "https://github.com/thatonetoast/tcrypt.git", tag = "0.1.1-1" }
+tcrypt = { version = "0.1.2" }
 tnet-macros = { path = "./tnet-macros" }
 
