@@ -925,6 +925,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "once_cell",
  "rand",
  "scopeguard",
  "serde",
@@ -937,10 +938,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tnet-build"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "tnet-macros"
 version = "0.1.0"
 dependencies = [
  "ctor",
+ "once_cell",
  "proc-macro2",
  "quote",
  "syn",

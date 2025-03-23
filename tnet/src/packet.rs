@@ -1,4 +1,4 @@
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{encrypt::Encryptor, errors::Error};
 
@@ -341,5 +341,65 @@ pub trait Packet: Serialize + DeserializeOwned + Clone + Send + Sync {
     /// * true if this is a broadcast packet, false otherwise
     fn is_broadcasting(&self) -> bool {
         self.body().is_broadcast_packet.unwrap_or(false)
+    }
+}
+
+pub mod registry {
+    use once_cell::sync::Lazy;
+    use std::any::{Any, TypeId};
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    // Registry maps field names to TypeId for runtime type checking
+    static PACKET_REGISTRY: Lazy<RwLock<HashMap<String, TypeId>>> =
+        Lazy::new(|| RwLock::new(HashMap::new()));
+
+    // Function to register a packet type with type_id
+    pub fn register_packet_type(field_name: &str, type_id: TypeId) {
+        {
+            let mut registry = PACKET_REGISTRY.write().unwrap();
+            registry.insert(field_name.to_string(), type_id);
+        }
+        println!(
+            "Registered packet type: {} with type_id {:?}",
+            field_name, type_id
+        );
+    }
+
+    // Generic function to register a type
+    pub fn register_type<T: Any + Send + Sync + 'static>(field_name: &str) {
+        register_packet_type(field_name, TypeId::of::<T>());
+    }
+
+    // Check if a type is registered
+    pub fn is_type_registered<T: Any>(field_name: &str) -> bool {
+        let registry = PACKET_REGISTRY.read().unwrap();
+        registry
+            .get(field_name)
+            .is_some_and(|&id| id == TypeId::of::<T>())
+    }
+
+    // Get all registered field names
+    pub fn get_registered_fields() -> Vec<String> {
+        let registry = PACKET_REGISTRY.read().unwrap();
+        registry.keys().cloned().collect()
+    }
+
+    // For debugging - get all registered type IDs
+    pub fn get_registered_type_ids() -> HashMap<String, TypeId> {
+        let registry = PACKET_REGISTRY.read().unwrap();
+        registry.clone()
+    }
+
+    // Print all registered type info
+    pub fn print_registry() {
+        {
+            let registry = PACKET_REGISTRY.read().unwrap();
+            println!("=== Packet Registry ===");
+            for (field, type_id) in registry.iter() {
+                println!("Field: {}, TypeId: {:?}", field, type_id);
+            }
+        }
+        println!("======================");
     }
 }

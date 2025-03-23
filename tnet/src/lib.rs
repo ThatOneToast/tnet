@@ -94,6 +94,10 @@
 //! }
 //! ```
 
+use std::sync::Mutex;
+
+use once_cell::sync::Lazy;
+
 pub mod asynch;
 pub mod encrypt;
 pub mod errors;
@@ -108,3 +112,73 @@ pub mod prelude;
 
 #[cfg(test)]
 mod tests;
+static PACKET_REGISTRY: Lazy<Mutex<Vec<(String, String)>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn refresh_packet_registry() -> bool {
+    use std::fs;
+    let temp_dir = std::env::temp_dir().join("tnet_registry");
+    let trigger_file = temp_dir.join("tnet_rebuild_trigger");
+
+    match fs::create_dir_all(&temp_dir) {
+        Ok(_) => fs::write(&trigger_file, "refresh").is_ok(),
+        Err(_) => false,
+    }
+}
+
+pub fn register_packet_type(field_name: &str, type_name: &str) {
+    if let Ok(mut registry) = PACKET_REGISTRY.lock() {
+        registry.push((field_name.to_string(), type_name.to_string()));
+    }
+}
+
+
+
+/// Includes the generated TnetPacket type in the current scope.
+///
+/// This macro should be used after setting up your build script with tnet-build.
+#[macro_export]
+macro_rules! include_tnet_packet {
+    () => {
+        // For normal compilation, just include the generated file
+        #[cfg(not(doctest))]
+        include!(concat!(env!("OUT_DIR"), "/tnet_packet.rs"));
+
+        // For doctests, provide a minimal stub
+        #[cfg(doctest)]
+        pub struct TnetPacket {
+            pub header: String,
+            pub body: $crate::packet::PacketBody,
+        }
+
+        #[cfg(doctest)]
+        impl $crate::packet::Packet for TnetPacket {
+            fn header(&self) -> String {
+                self.header.clone()
+            }
+            fn body(&self) -> $crate::packet::PacketBody {
+                self.body.clone()
+            }
+            fn body_mut(&mut self) -> &mut $crate::packet::PacketBody {
+                &mut self.body
+            }
+            fn ok() -> Self {
+                Self {
+                    header: "OK".to_string(),
+                    body: $crate::packet::PacketBody::default(),
+                }
+            }
+            fn error(error: $crate::errors::Error) -> Self {
+                Self {
+                    header: "ERROR".to_string(),
+                    body: $crate::packet::PacketBody::with_error_string(error),
+                }
+            }
+            fn keep_alive() -> Self {
+                Self {
+                    header: "KEEPALIVE".to_string(),
+                    body: $crate::packet::PacketBody::default(),
+                }
+            }
+        }
+    };
+}

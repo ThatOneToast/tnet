@@ -122,61 +122,81 @@ impl PacketScanner {
             println!("cargo:warning=Looking at file: {}", file.display());
 
             if let Ok(content) = fs::read_to_string(file) {
-                if content.contains("#[tpacket]") {
+                if content.contains("#[tpacket") {
                     println!(
                         "cargo:warning=Found tpacket attribute in file: {}",
                         file.display()
                     );
 
-                    // Extract struct names following #[tpacket]
+                    // Extract struct names and custom names following #[tpacket]
                     let lines = content.lines().collect::<Vec<_>>();
                     for (i, line) in lines.iter().enumerate() {
-                        if line.contains("#[tpacket]") && i + 1 < lines.len() {
-                            // Check the next line for struct definition
-                            let next_line = lines[i + 1];
-                            if next_line.contains("struct ") {
-                                let parts: Vec<&str> = next_line.split("struct ").collect();
-                                if parts.len() > 1 {
-                                    let struct_name_parts =
-                                        parts[1].split_whitespace().collect::<Vec<_>>();
-                                    if !struct_name_parts.is_empty() {
-                                        let struct_name =
-                                            struct_name_parts[0].trim_end_matches('{').trim();
-                                        let field_name = to_snake_case(struct_name);
+                        if line.contains("#[tpacket") {
+                            // Check for custom name in the attribute
+                            let mut custom_name = None;
+                            if line.contains("name =") {
+                                if let Some(name_start) = line.find("name = \"") {
+                                    if let Some(name_end) = line[name_start + 7..].find('\"') {
+                                        custom_name = Some(
+                                            line[name_start + 7..name_start + 7 + name_end]
+                                                .to_string(),
+                                        );
+                                    }
+                                }
+                            }
 
-                                        // Mark this as an active #[tpacket] struct
-                                        active_packet_fields.insert(field_name.clone());
+                            // Now check the next line for struct definition
+                            if i + 1 < lines.len() {
+                                let next_line = lines[i + 1];
+                                if next_line.contains("struct ") {
+                                    let parts: Vec<&str> = next_line.split("struct ").collect();
+                                    if parts.len() > 1 {
+                                        let struct_name_parts =
+                                            parts[1].split_whitespace().collect::<Vec<_>>();
+                                        if !struct_name_parts.is_empty() {
+                                            let struct_name =
+                                                struct_name_parts[0].trim_end_matches('{').trim();
 
-                                        // Try to construct the full type path based on file location
-                                        let file_path = file.to_string_lossy();
-                                        let module_path =
-                                            if let Some(src_idx) = file_path.find("src/") {
-                                                let module_part = &file_path[src_idx + 4..];
-                                                let module_part = module_part
-                                                    .trim_end_matches(".rs")
-                                                    .replace('/', "::");
-                                                format!("crate::{}", module_part)
-                                            } else {
-                                                "crate".to_string()
+                                            // Use custom name if provided, otherwise convert struct name to snake case
+                                            let field_name = match custom_name {
+                                                Some(name) => name,
+                                                None => to_snake_case(struct_name),
                                             };
 
-                                        // If it's a mod.rs file, adjust the path
-                                        let adjusted_path = if module_path.ends_with("::mod") {
-                                            module_path.trim_end_matches("::mod").to_string()
-                                        } else {
-                                            module_path
-                                        };
+                                            // Mark this as an active #[tpacket] struct
+                                            active_packet_fields.insert(field_name.clone());
 
-                                        let full_type =
-                                            format!("{}::{}", adjusted_path, struct_name);
+                                            // Try to construct the full type path based on file location
+                                            let file_path = file.to_string_lossy();
+                                            let module_path =
+                                                if let Some(src_idx) = file_path.find("src/") {
+                                                    let module_part = &file_path[src_idx + 4..];
+                                                    let module_part = module_part
+                                                        .trim_end_matches(".rs")
+                                                        .replace('/', "::");
+                                                    format!("crate::{}", module_part)
+                                                } else {
+                                                    "crate".to_string()
+                                                };
 
-                                        println!(
-                                            "cargo:warning=Found active packet in source: {} at {}",
-                                            field_name, full_type
-                                        );
+                                            // If it's a mod.rs file, adjust the path
+                                            let adjusted_path = if module_path.ends_with("::mod") {
+                                                module_path.trim_end_matches("::mod").to_string()
+                                            } else {
+                                                module_path
+                                            };
 
-                                        // Add to packet types directly from source scanning
-                                        packet_types.push((field_name, full_type));
+                                            let full_type =
+                                                format!("{}::{}", adjusted_path, struct_name);
+
+                                            println!(
+                                                "cargo:warning=Found active packet in source: {} at {}",
+                                                field_name, full_type
+                                            );
+
+                                            // Add to packet types directly from source scanning
+                                            packet_types.push((field_name, full_type));
+                                        }
                                     }
                                 }
                             }
@@ -198,15 +218,25 @@ impl PacketScanner {
                             // Check if this is still an active #[tpacket] struct
                             if active_packet_fields.contains(field_name) {
                                 if let Ok(content) = std::fs::read_to_string(&path) {
-                                    let type_path = content.trim();
+                                    // Check if the content has a custom field name marker
+                                    let parts: Vec<&str> = content.split('|').collect();
+
+                                    let type_path = parts[0].trim();
+                                    let actual_field_name = if parts.len() > 1 {
+                                        parts[1].trim()
+                                    } else {
+                                        field_name
+                                    };
 
                                     // Only add if not already in the list
-                                    if !packet_types.iter().any(|(f, _)| f == field_name) {
-                                        packet_types
-                                            .push((field_name.to_string(), type_path.to_string()));
+                                    if !packet_types.iter().any(|(f, _)| f == actual_field_name) {
+                                        packet_types.push((
+                                            actual_field_name.to_string(),
+                                            type_path.to_string(),
+                                        ));
                                         println!(
                                             "cargo:warning=Found packet from temp file: {} ({})",
-                                            field_name, type_path
+                                            actual_field_name, type_path
                                         );
                                     }
                                 }
@@ -241,17 +271,28 @@ impl PacketScanner {
                                     // Check if this is still an active #[tpacket] struct
                                     if active_packet_fields.contains(field_name) {
                                         if let Ok(content) = std::fs::read_to_string(&path) {
-                                            let type_path = content.trim();
+                                            // Check if the content has a custom field name marker
+                                            let parts: Vec<&str> = content.split('|').collect();
+
+                                            let type_path = parts[0].trim();
+                                            let actual_field_name = if parts.len() > 1 {
+                                                parts[1].trim()
+                                            } else {
+                                                field_name
+                                            };
 
                                             // Only add if not already in the list
-                                            if !packet_types.iter().any(|(f, _)| f == field_name) {
+                                            if !packet_types
+                                                .iter()
+                                                .any(|(f, _)| f == actual_field_name)
+                                            {
                                                 packet_types.push((
-                                                    field_name.to_string(),
+                                                    actual_field_name.to_string(),
                                                     type_path.to_string(),
                                                 ));
                                                 println!(
                                                     "cargo:warning=Found packet from target marker: {} ({})",
-                                                    field_name, type_path
+                                                    actual_field_name, type_path
                                                 );
                                             }
                                         }
@@ -294,8 +335,9 @@ impl PacketScanner {
     fn generate_tnet_packet_code(&self, packet_types: &[(String, String)]) -> String {
         let mut struct_fields = String::new();
         let mut default_fields = String::new();
-        let mut getter_methods = String::new();
-        let mut setter_methods = String::new();
+        // Remove these variables since we won't be generating getters and setters
+        // let mut getter_methods = String::new();
+        // let mut setter_methods = String::new();
 
         for (field_name, type_path) in packet_types {
             // Create sanitized field identifier
@@ -315,42 +357,15 @@ impl PacketScanner {
             // Add to default implementation
             writeln!(&mut default_fields, "            {}: None,", field_ident).unwrap();
 
-            // Generate getter method
-            writeln!(
-                &mut getter_methods,
-                r#"
-                /// Gets the {} value from this packet.
-                ///
-                /// # Returns
-                ///
-                /// * `Option<{}>` - The value if present, None otherwise
-                pub fn get_{}(&self) -> Option<{}> {{
-                    self.{}.clone()
-                }}
-                "#,
-                field_name, type_path, field_name, type_path, field_ident
-            )
-            .unwrap();
+            // Remove getter method generation
+            // ...
 
-            // Generate setter method
-            writeln!(
-                &mut setter_methods,
-                r#"
-                /// Sets the {} value in this packet.
-                ///
-                /// # Arguments
-                ///
-                /// * `value` - The value to set
-                pub fn set_{}(&mut self, value: {}) {{
-                    self.{} = Some(value);
-                }}
-                "#,
-                field_name, field_name, type_path, field_ident
-            )
-            .unwrap();
+            // Remove setter method generation
+            // ...
         }
 
         // Generate the TnetPacket implementation with fully qualified paths
+        // And remove references to getter and setter methods
         format!(
             r#"// This file is auto-generated. Do not edit manually.
 
@@ -387,9 +402,6 @@ impl PacketScanner {
                         {}
                     }}
                 }}
-
-                {}
-                {}
             }}
 
             impl ::tnet::packet::Packet for TnetPacket {{
@@ -420,7 +432,7 @@ impl PacketScanner {
                 }}
             }}
             "#,
-            struct_fields, default_fields, default_fields, getter_methods, setter_methods
+            struct_fields, default_fields, default_fields
         )
     }
 }

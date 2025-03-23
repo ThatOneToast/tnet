@@ -23,13 +23,14 @@ pub use crate::{
         phantom_listener::{PhantomListener, PhantomResources, PhantomSession},
         socket::TSocket,
     },
+    include_tnet_packet,
     phantom::{ClientConfig, PhantomConf, PhantomPacket},
 };
 
 pub use crate::handler_registry::{HandlerRegistration, get_handler, register_handler};
 
 pub use std::str::FromStr;
-pub use tnet_macros::{PacketHeader, tlisten_for};
+pub use tnet_macros::{PacketHeader, register_scan_dir, tlisten_for, tpacket};
 
 pub use crate::encrypt::{Encryptor, KeyExchange};
 pub use crate::errors::Error;

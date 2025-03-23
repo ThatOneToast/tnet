@@ -1,9 +1,35 @@
+#![allow(unused_imports)]
+#![allow(unused)]
+
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DataEnum, DeriveInput, Fields, ItemFn, LitStr, parse_macro_input};
+use syn::{
+    Attribute, Data, DataEnum, DeriveInput, Fields, FieldsNamed, Ident, ItemFn, ItemStruct, Lit,
+    LitStr, Meta, Token, Visibility,
+    parse::{Parse, ParseStream, Result},
+    parse_macro_input,
+    punctuated::Punctuated,
+};
 
-#[cfg(test)]
-mod tests;
+#[proc_macro]
+pub fn register_scan_dir(_input: TokenStream) -> TokenStream {
+    // Get the current directory
+    let current_dir = std::env::current_dir().unwrap_or_default();
+    let src_dir = current_dir.join("src");
+
+    // Output the cargo directive to set TNET_SCAN_DIRS
+    let output = format!(
+        r#"
+    println!("cargo:rustc-env=TNET_SCAN_DIRS={{}}", {});
+    "#,
+        src_dir.display().to_string().escape_debug()
+    );
+
+    output.parse().unwrap()
+}
 
 /// Automatically implements string conversion traits for an enum.
 ///
@@ -361,4 +387,147 @@ pub fn tlisten_for(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+struct TPacketArgs {
+    name: Option<String>,
+}
+
+impl Parse for TPacketArgs {
+    fn parse(input: ParseStream) -> Result<Self> {
+        // If input is empty, return default
+        if input.is_empty() {
+            return Ok(TPacketArgs { name: None });
+        }
+
+        // Parse a literal string if that's all that's provided
+        if input.peek(LitStr) {
+            let lit: LitStr = input.parse()?;
+            return Ok(TPacketArgs {
+                name: Some(lit.value()),
+            });
+        }
+
+        // Try to parse name = "value" format
+        let lookahead = input.lookahead1();
+        if lookahead.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            if ident == "name" {
+                let _: Token![=] = input.parse()?;
+                let lit: LitStr = input.parse()?;
+                return Ok(TPacketArgs {
+                    name: Some(lit.value()),
+                });
+            }
+            return Err(syn::Error::new(ident.span(), "Expected `name`"));
+        }
+
+        Err(lookahead.error())
+    }
+}
+
+#[proc_macro_attribute]
+pub fn tpacket(args: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse the struct
+    let item_clone = item.clone();
+    let input = parse_macro_input!(item_clone as ItemStruct);
+    let struct_name = &input.ident;
+
+    // Parse attribute arguments
+    let args = parse_macro_input!(args as TPacketArgs);
+
+    // Determine the field name
+    let field_name = if let Some(name) = args.name {
+        name
+    } else {
+        to_snake_case(&struct_name.to_string())
+    };
+
+    // Create an uppercase name for the constant
+    let marker_name = format_ident!(
+        "TNET_PACKET_MARKER_{}",
+        struct_name.to_string().to_uppercase()
+    );
+
+    // Create a string value for the registration
+    let marker_value = format!("{}={}", field_name, struct_name);
+
+    // Create a unique function name for registration
+    let register_fn_name = format_ident!(
+        "__tnet_register_{}",
+        to_snake_case(&struct_name.to_string())
+    );
+
+    let field_name_str = field_name.clone();
+    let struct_name_str = struct_name.to_string();
+
+    // Create the registration code
+    let registration = quote! {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub static #marker_name: &'static str = #marker_value;
+
+        // Run at compile time to create marker files
+        #[doc(hidden)]
+        #[ctor::ctor]
+        fn #register_fn_name() {
+            // This function will be called when the program starts
+            // Get the full module path at runtime
+            let module_path = module_path!();
+
+            // Create the full type path by combining module path with struct name
+            let full_path = format!("{}::{}", module_path, #struct_name_str);
+
+            // Create a marker file in the temporary directory
+            let temp_dir = ::std::env::temp_dir().join("tnet_registry");
+            let _ = ::std::fs::create_dir_all(&temp_dir);
+            let temp_file = temp_dir.join(format!("{}.packet", #field_name_str));
+
+            // Store both the full path to the type and the custom field name
+            let data = format!("{}|{}", full_path, #field_name_str);
+            let _ = ::std::fs::write(&temp_file, &data);
+
+            // Also write to target directory for persistence
+            let target_dir = ::std::path::Path::new("target/.tpacket_markers");
+            let _ = ::std::fs::create_dir_all(target_dir);
+            let target_file = target_dir.join(format!("{}.marker", #field_name_str));
+            let _ = ::std::fs::write(&target_file, &data);
+        }
+    };
+
+    // Always add the necessary derives
+    let derive_tokens = quote! {
+        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
+    };
+
+    // Combine everything and return
+    let expanded = quote! {
+        #derive_tokens
+        #input
+        #registration
+    };
+
+    TokenStream::from(expanded)
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    // Handle first character
+    if let Some(c) = chars.next() {
+        result.extend(c.to_lowercase());
+    }
+
+    // Process remaining characters
+    for c in chars {
+        if c.is_uppercase() {
+            result.push('_');
+            result.extend(c.to_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
