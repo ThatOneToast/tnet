@@ -6,6 +6,7 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 proc-macro = true
+doctest = false
 
 [dependencies]
 ctor = "0.4.1"
