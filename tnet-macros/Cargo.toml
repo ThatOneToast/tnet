@@ -2,6 +2,14 @@
 name = "tnet-macros"
 version = "0.1.0"
 edition = "2024"
+description = "Macros for tnet"
+keywords = ["networking", "async", "encryption"]
+categories = ["network-programming", "asynchronous"]
+repository = { workspace = true }
+license = { workspace = true }
+license-file = { workspace = true }
+readme = { workspace = true }
+
 
 [lib]
 path = "src/lib.rs"

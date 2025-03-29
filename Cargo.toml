@@ -3,3 +3,7 @@
 [workspace]
 members = ["tnet", "tnet-macros", "tnet-build"]
 resolver = "3"
+package.license-file = "LICENSE"
+package.license = "MIT"
+package.readme = "README.md"
+package.repository = "https://github.com/ThatOneToast/tnet"

@@ -21,7 +21,8 @@ A robust async TCP networking library for Rust that provides:
 - 🚀 **Async/Await** - Built on tokio for high performance
 - 🌐 **Relay/Proxy** - Network traffic relay with the phantom client/server system
 - 🎯 **Attribute Macros** - Easy handler registration with the `#[tlisten_for("PACKET_TYPE")]` macro
-- 🏷️ **Derive Macros** - Generate packet header types with `#[derive(PacketHeader)]`
+- 🏷️ **Derive Macros** - Generate string-based enum conversions with `#[derive(ParseEnumString)]`
+- 📦 **Dynamic Packet Type** - Automatic `TnetPacket` generation based on `#[tpacket]` attributed structs
 
 
 ## Example Usage
@@ -128,11 +129,11 @@ async fn handle_login(
 ) {
     let mut socket = sources.socket;
     println!("Processing login request");
-    
+
     // Access resources if needed
     let mut resources = sources.resources.write().await;
     resources.data.push("Login processed".to_string());
-    
+
     // Send response
     socket.send(MyPacket::ok()).await.unwrap();
 }
@@ -216,7 +217,7 @@ async fn main() {
     // Send a packet and get response
     let response = client.send_recv(MyPacket::ok()).await.unwrap();
     println!("Server response: {:?}", response);
-    
+
     // Send a login packet
     let mut login_packet = MyPacket::ok();
     login_packet.header = "LOGIN".to_string();
@@ -225,15 +226,94 @@ async fn main() {
 }
 ```
 
+### Using the Dynamic TnetPacket
+
+```rust
+use tnet::prelude::*;
+
+// Add the tpacket attribute to your packet structs to include them in TnetPacket
+#[tpacket]
+struct LoginPacket {
+    username: String,
+    password: String,
+}
+
+#[tpacket]
+struct ChatMessage {
+    message: String,
+    timestamp: u64,
+}
+
+// You can use a custom field name as well
+#[tpacket(name = "user_profile")]
+struct UserProfile {
+    id: String,
+    display_name: String,
+    avatar_url: Option<String>,
+}
+
+// Set up your build.rs to generate the TnetPacket
+// build.rs:
+fn main() {
+    tnet_build::scan_packets!();
+}
+
+// In your code, include the generated TnetPacket
+include_tnet_packet!();
+
+// Create a server that uses TnetPacket
+#[tokio::main]
+async fn main() {
+    let server = AsyncListener::new(
+        ("127.0.0.1", 8080),
+        30,
+        wrap_handler!(handle_tnet_packet),
+        wrap_handler!(handle_error)
+    ).await;
+
+    server.run().await;
+}
+
+async fn handle_tnet_packet(
+    sources: HandlerSources<MySession, MyResource>,
+    packet: TnetPacket
+) {
+    let mut socket = sources.socket;
+
+    // You can now handle different packet types
+    if let Some(login) = packet.login_packet {
+        println!("Login attempt: {}", login.username);
+        // Process login...
+    }
+    else if let Some(chat) = packet.chat_message {
+        println!("Chat message: {}", chat.message);
+        // Process chat...
+    }
+    else if let Some(profile) = packet.user_profile {
+        println!("User profile update: {}", profile.display_name);
+        // Process profile update...
+    }
+
+    socket.send(TnetPacket::ok()).await.unwrap();
+}
+
+async fn handle_error(
+    sources: HandlerSources<MySession, MyResource>,
+    error: Error
+) {
+    println!("Error: {:?}", error);
+}
+```
+
 ## Advanced Usage
 
-### Packet Header Enum with Derive Macro
+### ParseEnumString for Packet Headers
 
 ```rust
 use tnet::prelude::*;
 
 // Define packet headers as an enum
-#[derive(Debug, Clone, PacketHeader)]
+#[derive(Debug, Clone, ParseEnumString)]
 enum MyHeaders {
     Login,
     Logout,
@@ -247,12 +327,12 @@ enum MyHeaders {
 #[tlisten_for("Login")]
 async fn handle_login(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
     // Login logic here
-    
+
     // The enum provides automatic string conversion
     let response_header = MyHeaders::Ok.to_string();
     let mut response = MyPacket::ok();
     response.header = response_header;
-    
+
     sources.socket.send(response).await.unwrap();
 }
 
@@ -306,11 +386,6 @@ let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8080)
 ### Broadcasting
 
 ```rust
-// Server-side broadcasting
-async fn broadcast_message(server: &AsyncListener<MyPacket, MySession, MyResource>, msg: MyPacket) {
-    server.broadcast(msg).await.unwrap();
-}
-
 // Client-side broadcast handling
 let client = AsyncClient::<MyPacket>::new("127.0.0.1", 8080)
     .await
@@ -375,7 +450,7 @@ let client_config = ClientConfig {
     pass: Some("pass".to_string()),
 };
 
-// 3. Create a phantom configuration 
+// 3. Create a phantom configuration
 let phantom_conf = PhantomConf {
     header: "relay",
     username: Some("user"),

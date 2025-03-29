@@ -94,31 +94,31 @@ pub fn register_scan_dir(_input: TokenStream) -> TokenStream {
 ///     KeepAlive,
 /// }
 ///
-/// fn main() {
+/// fn test() {
 ///     // Display
-///     let header = PacketHeader::OK;
+///     let header = ParseEnumString::OK;
 ///     println!("Header: {}", header); // Prints: Header: OK
 ///
 ///     // FromStr
-///     let parsed = PacketHeader::from_str("ERROR").unwrap();
-///     assert_eq!(parsed, PacketHeader::ERROR);
+///     let parsed = ParseEnumString::from_str("ERROR").unwrap();
+///     assert_eq!(parsed, ParseEnumString::ERROR);
 ///
 ///     // From<&str>
-///     let from_str = PacketHeader::from("KeepAlive");
-///     assert_eq!(from_str, PacketHeader::KeepAlive);
+///     let from_str = ParseEnumString::from("KeepAlive");
+///     assert_eq!(from_str, ParseEnumString::KeepAlive);
 ///
 ///     // From<String>
-///     let from_string = PacketHeader::from(String::from("OK"));
-///     assert_eq!(from_string, PacketHeader::OK);
+///     let from_string = ParseEnumString::from(String::from("OK"));
+///     assert_eq!(from_string, ParseEnumString::OK);
 ///
 ///     // Error handling with parse
-///     let result = PacketHeader::from_str("Unknown");
+///     let result = ParseEnumString::from_str("Unknown");
 ///     assert!(result.is_err());
 ///     assert_eq!(result.unwrap_err(), "Unknown variant: Unknown");
 /// }
 /// ```
-#[proc_macro_derive(PacketHeader)]
-pub fn packet_header_derive(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(ParseEnumString)]
+pub fn parse_enum_string(input: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -126,7 +126,7 @@ pub fn packet_header_derive(input: TokenStream) -> TokenStream {
     // Extract enum variants
     let variants = match &input.data {
         Data::Enum(DataEnum { variants, .. }) => variants,
-        _ => panic!("PacketHeader can only be derived for enums"),
+        _ => panic!("ParseEnumString can only be derived for enums"),
     };
 
     // Generate match arms for to_string
@@ -135,7 +135,7 @@ pub fn packet_header_derive(input: TokenStream) -> TokenStream {
         // Ensure variant has no fields
         match &variant.fields {
             Fields::Unit => {}
-            _ => panic!("PacketHeader only supports unit variants"),
+            _ => panic!("ParseEnumString only supports unit variants"),
         }
         let variant_str = variant_name.to_string();
         quote! {

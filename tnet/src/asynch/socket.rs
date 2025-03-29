@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, vec::IntoIter};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -144,6 +144,14 @@ where
             Err(Error::Broadcast(format!("Broadcast errors: {:?}", errors)))
         }
     }
+
+    pub async fn iter(&self) -> impl Iterator<Item = TSocket<S>> {
+        self.sockets.read().await.clone().into_iter()
+    }
+
+    pub async fn iter_mut(&mut self) -> impl Iterator<Item = TSocket<S>> {
+        self.sockets.write().await.clone().into_iter()
+    }
 }
 
 impl<S> Default for TSockets<S>
@@ -152,6 +160,26 @@ where
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<S: session::Session> IntoIterator for &TSockets<S> {
+    type Item = TSocket<S>;
+    type IntoIter = IntoIter<TSocket<S>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let sockets = futures::executor::block_on(async { self.sockets.read().await.clone() });
+        sockets.into_iter()
+    }
+}
+
+impl<S: session::Session> IntoIterator for &mut TSockets<S> {
+    type Item = TSocket<S>;
+    type IntoIter = IntoIter<TSocket<S>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let sockets = futures::executor::block_on(async { self.sockets.write().await.clone() });
+        sockets.into_iter()
     }
 }
 
@@ -464,6 +492,117 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S
         } else {
             Err(Error::Broadcast(format!(
                 "Triple tuple broadcast errors: {:?}",
+                errors
+            )))
+        }
+    }
+}
+
+impl<S: session::Session> BroadcastExt<S> for &(TSocket<S>, TSocket<S>) {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        if let Err(e) = self.0.clone().send(packet.clone()).await {
+            errors.push(e);
+        }
+        if let Err(e) = self.1.clone().send(packet).await {
+            errors.push(e);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Broadcast(format!(
+                "Tuple broadcast errors: {:?}",
+                errors
+            )))
+        }
+    }
+}
+
+impl<S: session::Session> BroadcastExt<S> for &(TSocket<S>, TSocket<S>, TSocket<S>) {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        if let Err(e) = self.0.clone().send(packet.clone()).await {
+            errors.push(e);
+        }
+        if let Err(e) = self.1.clone().send(packet.clone()).await {
+            errors.push(e);
+        }
+        if let Err(e) = self.2.clone().send(packet).await {
+            errors.push(e);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Broadcast(format!(
+                "Triple tuple broadcast errors: {:?}",
+                errors
+            )))
+        }
+    }
+}
+
+impl<S: session::Session> BroadcastExt<S> for &[TSocket<S>] {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        for socket in self.iter() {
+            if let Err(e) = socket.clone().send(packet.clone()).await {
+                errors.push(e);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Broadcast(format!(
+                "Slice broadcast errors: {:?}",
+                errors
+            )))
+        }
+    }
+}
+
+impl<S: session::Session> BroadcastExt<S> for [TSocket<S>] {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        for socket in self.iter() {
+            if let Err(e) = socket.clone().send(packet.clone()).await {
+                errors.push(e);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Broadcast(format!(
+                "Slice broadcast errors: {:?}",
+                errors
+            )))
+        }
+    }
+}
+
+impl<S: session::Session> BroadcastExt<S> for [&TSocket<S>] {
+    async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
+        let mut errors = Vec::new();
+
+        for socket in self.iter() {
+            let sock = *socket;
+            if let Err(e) = sock.clone().send(packet.clone()).await {
+                errors.push(e);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Broadcast(format!(
+                "Slice broadcast errors: {:?}",
                 errors
             )))
         }
