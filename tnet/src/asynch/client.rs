@@ -167,7 +167,7 @@ pub struct ConnectionHandler {
 pub type MessageHandler<P> = Box<dyn Fn(&P) -> bool + Send + Sync>;
 
 /// Type alias for broadcast handling functions.
-pub type BroadcastHandler<P> = Box<dyn Fn(&P) + Send + Sync>;
+pub type BroadcastHandler<P> = Box<dyn Fn(P) + Send + Sync>;
 
 /// Configuration for reconnection behavior with exponential backoff.
 #[derive(Debug, Clone)]
@@ -261,6 +261,7 @@ where
     pub(crate) keepalive_reconnect_tx: Option<mpsc::Sender<()>>,
     response_rx: mpsc::Receiver<Vec<u8>>,
     broadcast_handler: Option<Arc<BroadcastHandler<P>>>,
+    broadcast_processor_running: Arc<AtomicBool>,
     reconnection_config: ReconnectionConfig,
     current_endpoint: Option<(String, u16)>,
     connection_closed: Arc<AtomicBool>,
@@ -306,7 +307,7 @@ where
             .map_err(|e| Error::IoError(e.to_string()))?;
 
         let (writer_tx, mut writer_rx) = mpsc::channel::<ClientMessage>(32);
-        let (reader_tx, reader_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (reader_tx, reader_rx) = mpsc::channel::<Vec<u8>>(32); // Keep as Vec<u8>
 
         let connection_closed = Arc::new(AtomicBool::new(false));
         let connection_closed_writer = connection_closed.clone();
@@ -349,7 +350,6 @@ where
         // Clone reader_tx before moving it
         let reader_tx_clone = reader_tx.clone();
 
-        // Spawn reader task
         tokio::spawn({
             async move {
                 let mut buf = vec![0; 4096];
@@ -386,7 +386,9 @@ where
             }
         });
 
-        Ok(Self {
+        let broadcast_processor_running = Arc::new(AtomicBool::new(false));
+
+        let client = Self {
             connection: ConnectionHandler {
                 writer_tx,
                 reader_tx,
@@ -400,6 +402,7 @@ where
             keep_alive_running: Arc::new(AtomicBool::new(false)),
             response_rx: reader_rx,
             broadcast_handler: None,
+            broadcast_processor_running,
             reconnection_config: ReconnectionConfig::default(),
             current_endpoint: Some((ip.to_string(), port)),
             connection_closed,
@@ -407,7 +410,9 @@ where
             keepalive_reconnect_tx: None,
             keepalive_reconnect_needed: Arc::new(AtomicBool::new(false)),
             _packet: PhantomData,
-        })
+        };
+
+        Ok(client)
     }
 
     async fn try_reconnect(&mut self) -> Result<(), Error> {
@@ -564,19 +569,102 @@ where
         self
     }
 
-    /// Adds a handler for broadcast messages.
+    /// Sets a broadcast handler and starts the broadcast processor.
+    ///
+    /// This method takes a function that will be called whenever a broadcast
+    /// packet is received.
     ///
     /// # Arguments
     ///
-    /// * `handler` - Function to handle broadcast messages
+    /// * `handler` - Function to be called for broadcast packets
     ///
     /// # Returns
     ///
-    /// * `Self` - The configured client instance
+    /// * The configured client with broadcast handling enabled
     #[must_use]
     pub fn with_broadcast_handler(mut self, handler: BroadcastHandler<P>) -> Self {
         self.broadcast_handler = Some(Arc::new(handler));
         self
+    }
+
+    /// Starts the broadcast packet processor.
+    ///
+    /// This creates a new channel for regular responses and spawns a task that:
+    /// 1. Reads from the original response channel
+    /// 2. Determines if packets are broadcasts or regular responses
+    /// 3. Routes broadcasts to the handler and regular responses to the new channel
+    fn start_broadcast_processor(&mut self) -> Result<(), Error>
+    where
+        P: 'static,
+    {
+        // Only start if we have a broadcast handler and it's not already running
+        if self.broadcast_handler.is_none()
+            || self.broadcast_processor_running.load(Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+
+        // Create a new channel for filtered responses
+        let (filtered_tx, filtered_rx) = mpsc::channel::<Vec<u8>>(32);
+
+        // Take ownership of the original response channel
+        let mut original_rx = std::mem::replace(&mut self.response_rx, filtered_rx);
+
+        // Get references to needed data
+        let broadcast_handler = self.broadcast_handler.clone().unwrap();
+        let encryption = self.encryption.clone();
+        let broadcast_running = self.broadcast_processor_running.clone();
+        let connection_closed = self.connection_closed.clone();
+
+        // Set the running flag
+        broadcast_running.store(true, Ordering::SeqCst);
+
+        // Spawn the processor task
+        tokio::spawn(async move {
+            println!("Broadcast processor started");
+
+            while broadcast_running.load(Ordering::SeqCst) {
+                // Exit if connection is closed
+                if connection_closed.load(Ordering::SeqCst) {
+                    println!("Connection closed, stopping broadcast processor");
+                    break;
+                }
+
+                // Get the next packet
+                let bytes =
+                    match tokio::time::timeout(Duration::from_secs(1), original_rx.recv()).await {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => {
+                            println!("Response channel closed, stopping broadcast processor");
+                            connection_closed.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        Err(_) => {
+                            // Just a timeout, continue polling
+                            continue;
+                        }
+                    };
+
+                let packet = match &encryption {
+                    ClientEncryption::None => P::de(&bytes),
+                    ClientEncryption::Encrypted(encryptor) => P::encrypted_de(&bytes, encryptor),
+                };
+
+                if packet.is_broadcasting() {
+                    broadcast_handler(packet);
+                } else if packet.header() == P::keep_alive().header() {
+                } else if let Err(e) = filtered_tx.send(bytes).await {
+                    eprintln!("Failed to forward response: {}", e);
+                    connection_closed.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+
+            broadcast_running.store(false, Ordering::SeqCst);
+            println!("Broadcast processor stopped");
+        });
+
+        Ok(())
     }
 
     /// Finalizes the client setup and establishes the connection.
@@ -587,13 +675,14 @@ where
     /// # Panics
     ///
     /// Panics if there is an error sending the initial packet or starting keepalive.
-    pub async fn finalize(&mut self) {
+    pub async fn finalize(&mut self)
+    where
+        P: 'static,
+    {
         println!("Finalizing client connection...");
 
-        // Make sure connection is not marked as closed
         self.connection_closed.store(false, Ordering::SeqCst);
 
-        // Send initial packet to get session
         match self.send_recv(P::ok()).await {
             Ok(_) => println!("Successfully initialized connection"),
             Err(e) => {
@@ -605,12 +694,17 @@ where
             }
         }
 
-        // Start keepalive if enabled
         if self.keep_alive.enabled {
             match self.start_keepalive() {
                 Ok(_) => println!("Keepalive initialized successfully"),
                 Err(e) => println!("Failed to start keepalive: {}", e),
             }
+        }
+
+        if self.broadcast_handler.is_some() {
+            self.start_broadcast_processor()
+                .map_err(|e| panic!("Failed to start broadcast processor \n\n{e}"))
+                .unwrap();
         }
     }
 
@@ -910,7 +1004,6 @@ where
                 Err(Error::ConnectionClosed)
             }
             Err(_) => {
-                // Just return timeout error without any reconnection attempt
                 Err(Error::IoError("Receive operation timed out".to_string()))
             }
         }
@@ -1065,9 +1158,7 @@ where
                     match writer_tx.send(ClientMessage::Ping(ping_tx)).await {
                         Ok(()) => {
                             match tokio::time::timeout(Duration::from_secs(2), ping_rx).await {
-                                Ok(Ok(true)) => {
-                                    // Ping successful, connection verified
-                                }
+                                Ok(Ok(true)) => {}
                                 _ => {
                                     println!("Ping failed, connection may be unstable");
                                     consecutive_failures += 1;

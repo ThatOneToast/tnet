@@ -379,8 +379,6 @@ pub fn tlisten_for(attr: TokenStream, item: TokenStream) -> TokenStream {
                     // Optional: Log registration for debugging
                     #[cfg(debug_assertions)]
                     println!("Registered handler for {} at {}", #packet_type, #fn_path);
-
-                    ()
                 });
             }
         }

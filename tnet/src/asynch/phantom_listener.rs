@@ -138,7 +138,7 @@ async fn ok(
 
         println!(
             "Received a relay request from {:?} -> {}:{}",
-            socket.addr().await,
+            socket.addr,
             client_config.server_addr,
             client_config.server_port
         );

@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 pub mod reconnection_tests;
 pub mod relay_test;
 pub mod tlisten_tests;
+
 // Define packet type exactly as in README
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MyPacket {
+pub struct MyPacket {
     header: String,
     body: PacketBody,
 }
@@ -60,7 +61,7 @@ impl ImplPacket for MyPacket {
 
 // Define session type exactly as in README
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MySession {
+pub struct MySession {
     id: String,
     created_at: u64,
     duration: Duration,
@@ -93,7 +94,7 @@ impl ImplSession for MySession {
 
 // Define resource type exactly as in README
 #[derive(Debug, Clone)]
-struct MyResource {
+pub struct MyResource {
     _data: Vec<String>,
 }
 

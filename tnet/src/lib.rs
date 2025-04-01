@@ -131,8 +131,6 @@ pub fn register_packet_type(field_name: &str, type_name: &str) {
     }
 }
 
-
-
 /// Includes the generated TnetPacket type in the current scope.
 ///
 /// This macro should be used after setting up your build script with tnet-build.

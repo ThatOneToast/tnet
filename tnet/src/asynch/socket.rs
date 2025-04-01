@@ -2,7 +2,10 @@ use std::{sync::Arc, vec::IntoIter};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{
+        TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
     sync::{Mutex, RwLock},
 };
 
@@ -80,6 +83,28 @@ where
         self.sockets.write().await.push(socket);
     }
 
+    /// Adds a batch of sockets to the collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `sockets`: The sockets to add to the collection
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use tnet::socket::{TSockets, TSocket};
+    /// # use tokio::net::TcpStream;
+    /// # async fn example() {
+    /// # let stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+    /// # let socket = TSocket::new(stream, Arc::new(RwLock::new(Sessions::new())));
+    /// let mut sockets = TSockets::new();
+    /// sockets.add_batch(vec![socket]).await;
+    /// # }
+    /// ```
+    pub async fn add_batch(&mut self, sockets: Vec<TSocket<S>>) {
+        self.sockets.write().await.extend(sockets);
+    }
+
     /// Removes a socket from the collection.
     ///
     /// # Arguments
@@ -100,6 +125,32 @@ where
             .write()
             .await
             .retain(|s| s.session_id != socket.session_id);
+    }
+
+    /// Removes a batch of sockets from the collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `sockets`: The sockets to remove
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use tnet::socket::{TSockets, TSocket};
+    /// # async fn example(sockets: Vec<TSocket<Session>>) {
+    /// let mut sockets = TSockets::new();
+    /// sockets.remove_batch(sockets).await;
+    /// # }
+    /// ```
+    pub async fn remove_batch(&mut self, sockets: Vec<&TSocket<S>>) {
+        let ses_ids = sockets
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect::<Vec<_>>();
+        self.sockets
+            .write()
+            .await
+            .retain(|s| !ses_ids.contains(&s.session_id));
     }
 
     /// Broadcasts a packet to all connected sockets.
@@ -125,12 +176,28 @@ where
         let errors = {
             let mut errors = Vec::new();
 
-            {
-                let mut sockets = self.sockets.write().await;
+            // Get a copy of all the sockets we need to send to
+            let sockets_to_broadcast = {
+                let sockets = self.sockets.read().await;
+                sockets.clone()
+            };
 
-                for socket in sockets.iter_mut() {
-                    if let Err(e) = socket.send(packet.clone()).await {
+            // Explicitly mark as broadcast - this is crucial
+            let broadcast_packet = packet.set_broadcasting();
+
+            println!(
+                "DEBUG: Broadcasting packet: {:?} to {} sockets",
+                broadcast_packet.header(),
+                sockets_to_broadcast.len()
+            );
+
+            // Send to each socket
+            for mut socket in sockets_to_broadcast {
+                match socket.send(broadcast_packet.clone()).await {
+                    Ok(_) => println!("DEBUG: Successfully sent broadcast to a socket"),
+                    Err(e) => {
                         errors.push(e);
+                        println!("DEBUG: Failed to send broadcast to a socket");
                     }
                 }
             }
@@ -183,6 +250,24 @@ impl<S: session::Session> IntoIterator for &mut TSockets<S> {
     }
 }
 
+impl<S> AsRef<Self> for TSockets<S>
+where
+    S: session::Session,
+{
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl<S> AsMut<Self> for TSockets<S>
+where
+    S: session::Session,
+{
+    fn as_mut(&mut self) -> &mut Self {
+        self
+    }
+}
+
 /// A thread-safe wrapper around a TCP socket with session management and encryption capabilities.
 ///
 /// `TSocket` provides a high-level interface for handling TCP connections with integrated
@@ -210,9 +295,11 @@ pub struct TSocket<S>
 where
     S: session::Session,
 {
-    pub socket: Arc<Mutex<TcpStream>>,
+    pub read_part: Arc<Mutex<OwnedReadHalf>>,
+    pub write_part: Arc<Mutex<OwnedWriteHalf>>,
     pub session_id: Option<String>,
     pub encryptor: Option<Encryptor>,
+    pub addr: String,
     sessions: Arc<RwLock<Sessions<S>>>,
 }
 
@@ -231,10 +318,15 @@ where
     ///
     /// * A new `TSocket` instance
     pub fn new(socket: TcpStream, sessions: Arc<RwLock<Sessions<S>>>) -> Self {
+        let addr = socket.peer_addr().unwrap().to_string();
+        let (read, write) = socket.into_split();
+
         Self {
-            socket: Arc::new(Mutex::new(socket)),
+            read_part: Arc::new(Mutex::new(read)),
+            write_part: Arc::new(Mutex::new(write)),
             session_id: None,
             encryptor: None,
+            addr,
             sessions,
         }
     }
@@ -329,8 +421,15 @@ where
             .encryptor
             .as_ref()
             .map_or_else(|| packet.ser(), |encryptor| packet.encrypted_ser(encryptor));
+        let header = packet.header();
+        let mut socket = self
+            .write_part
+            .try_lock()
+            .map_err(|e| {
+                panic!("PacketHeader-{header} ::: Socket lock held esle where. \n \n {e} \n")
+            })
+            .unwrap();
 
-        let mut socket = self.socket.lock().await;
         socket
             .write_all(&data)
             .await
@@ -356,11 +455,26 @@ where
     pub async fn recv<P: Packet>(&mut self) -> Result<P, Error> {
         let mut buf = vec![0; 4096];
         let n = {
-            let mut socket = self.socket.lock().await;
-            socket
-                .read(&mut buf)
+            let mut socket = self
+                .read_part
+                .try_lock()
+                .map_err(|e| panic!("Recv Socket lock held esle where. \n \n {e} \n"))
+                .unwrap();
+
+            // Set up a timeout to prevent holding the lock for too long
+            match tokio::time::timeout(std::time::Duration::from_secs(1), socket.read(&mut buf))
                 .await
-                .map_err(|e| Error::IoError(e.to_string()))?
+            {
+                Ok(res) => {
+                    let n = res.map_err(|e| Error::IoError(e.to_string()))?;
+                    drop(socket);
+                    n
+                }
+                Err(_) => {
+                    drop(socket);
+                    return Err(Error::ReadTimeout);
+                }
+            }
         };
 
         if n == 0 {
@@ -389,7 +503,7 @@ where
     ///
     /// Returns `Error::IoError` if writing to the socket fails
     pub async fn send_raw(&mut self, packet: Vec<u8>) -> Result<(), Error> {
-        let mut socket = self.socket.lock().await;
+        let mut socket = self.write_part.lock().await;
         socket
             .write_all(&packet)
             .await
@@ -415,11 +529,13 @@ where
     pub async fn recv_raw(&mut self) -> Result<Vec<u8>, Error> {
         let mut buf = vec![0; 4096];
         let n = {
-            let mut socket = self.socket.lock().await;
-            socket
+            let mut socket = self.read_part.lock().await;
+            let res = socket
                 .read(&mut buf)
                 .await
-                .map_err(|e| Error::IoError(e.to_string()))?
+                .map_err(|e| Error::IoError(e.to_string()))?;
+            drop(socket);
+            res
         };
 
         if n == 0 {
@@ -430,19 +546,23 @@ where
 
         Ok(buf)
     }
+}
 
-    /// Gets the peer address of the socket.
-    ///
-    /// # Returns
-    ///
-    /// * A String containing the peer address
-    ///
-    /// # Panics
-    ///
-    /// Panics if getting the peer address fails
-    pub async fn addr(&self) -> String {
-        let socket = self.socket.lock().await;
-        socket.peer_addr().unwrap().to_string()
+impl<S> AsRef<Self> for TSocket<S>
+where
+    S: session::Session,
+{
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl<S> AsMut<Self> for TSocket<S>
+where
+    S: session::Session,
+{
+    fn as_mut(&mut self) -> &mut Self {
+        self
     }
 }
 
@@ -454,6 +574,7 @@ pub trait BroadcastExt<S: session::Session> {
 impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
         if let Err(e) = self.0.clone().send(packet.clone()).await {
             errors.push(e);
@@ -476,6 +597,7 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>) {
 impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
         if let Err(e) = self.0.clone().send(packet.clone()).await {
             errors.push(e);
@@ -498,9 +620,10 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for &(TSocket<S>, TSocket<S>) {
+impl<S: session::Session> BroadcastExt<S> for (&TSocket<S>, &TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
         if let Err(e) = self.0.clone().send(packet.clone()).await {
             errors.push(e);
@@ -520,9 +643,10 @@ impl<S: session::Session> BroadcastExt<S> for &(TSocket<S>, TSocket<S>) {
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for &(TSocket<S>, TSocket<S>, TSocket<S>) {
+impl<S: session::Session> BroadcastExt<S> for (&TSocket<S>, &TSocket<S>, &TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
         if let Err(e) = self.0.clone().send(packet.clone()).await {
             errors.push(e);
@@ -548,6 +672,7 @@ impl<S: session::Session> BroadcastExt<S> for &(TSocket<S>, TSocket<S>, TSocket<
 impl<S: session::Session> BroadcastExt<S> for &[TSocket<S>] {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
         for socket in self.iter() {
             if let Err(e) = socket.clone().send(packet.clone()).await {
@@ -569,6 +694,7 @@ impl<S: session::Session> BroadcastExt<S> for &[TSocket<S>] {
 impl<S: session::Session> BroadcastExt<S> for [TSocket<S>] {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
         for socket in self.iter() {
             if let Err(e) = socket.clone().send(packet.clone()).await {
@@ -590,12 +716,18 @@ impl<S: session::Session> BroadcastExt<S> for [TSocket<S>] {
 impl<S: session::Session> BroadcastExt<S> for [&TSocket<S>] {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
+        let packet = packet.set_broadcasting();
 
-        for socket in self.iter() {
+        let mut socket_idx = 0;
+        for socket in self {
+            socket_idx += 1;
             let sock = *socket;
+
+            println!("Sending for socket {}", socket_idx);
             if let Err(e) = sock.clone().send(packet.clone()).await {
                 errors.push(e);
             }
+            println!("Sent for socket {}", socket_idx);
         }
 
         if errors.is_empty() {

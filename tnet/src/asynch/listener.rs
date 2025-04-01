@@ -137,7 +137,7 @@ impl<S: session::Session> PoolRef<S> {
         };
 
         for pool in pools_to_broadcast {
-            pool.broadcast(packet.clone()).await?;
+            pool.broadcast(packet.clone().set_broadcasting()).await?;
         }
 
         Ok(())
@@ -151,7 +151,7 @@ impl<S: session::Session> PoolRef<S> {
     ) -> Result<(), Error> {
         let pools = self.0.read().await;
         if let Some(pool) = pools.get(pool_name) {
-            pool.broadcast(packet).await?;
+            pool.broadcast(packet.set_broadcasting()).await?;
             Ok(())
         } else {
             Err(Error::InvalidPool(pool_name.to_string()))
@@ -236,7 +236,7 @@ where
     S: session::Session + 'static,
     R: resources::Resource + 'static,
 {
-    listener: TcpListener,
+    pub listener: TcpListener,
     ok_handler: AsyncListenerOkHandler<P, S, R>,
     error_handler: AsyncListenerErrorHandler<S, R>,
     authenticator: Authenticator,
@@ -278,7 +278,6 @@ where
     ) -> Self {
         let sessions = Arc::new(RwLock::new(Sessions::new()));
 
-        // Start the background cleanup task
         let sessions_clone = sessions.clone();
         tokio::spawn(async move {
             let mut interval =
@@ -385,11 +384,35 @@ where
     ///     listener.with_pool("main_pool").await;
     /// }
     /// ```
-    pub async fn with_pool(&self, pool_name: impl ToString) {
+    pub async fn with_pool(self, pool_name: impl ToString) -> Self {
         self.pools
             .write()
             .await
             .insert(pool_name.to_string(), TSockets::new());
+        self
+    }
+
+    /// Creates multiple connection pools with the specified names.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool_names` - Names for the new connection pools
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// async fn setup_pools(listener: &AsyncListener<P, S, R>) {
+    ///     listener.with_pools(vec!["main_pool", "secondary_pool"]).await;
+    /// }
+    /// ```
+    pub async fn with_pools(self, pool_names: Vec<impl ToString>) -> Self {
+        for name in pool_names {
+            self.pools
+                .write()
+                .await
+                .insert(name.to_string(), TSockets::new());
+        }
+        self
     }
 
     /// Configures shared resources for the listener.
@@ -457,11 +480,12 @@ where
     ///
     /// * `std::io::Result<Encryptor>` - The configured encryptor or an error
     async fn handle_encryption_handshake(&self, socket: &TSocket<S>) -> std::io::Result<Encryptor> {
-        let mut sock = socket.socket.lock().await;
 
+        let mut read_part = socket.read_part.lock().await;
+        
         // Read length prefix
         let mut length_buf = [0u8; 4];
-        sock.read_exact(&mut length_buf).await?;
+        read_part.read_exact(&mut length_buf).await?;
         let length = u32::from_be_bytes(length_buf) as usize;
 
         if length != 32 {
@@ -473,7 +497,8 @@ where
 
         // Read client's public key
         let mut client_public_key = [0u8; 32];
-        sock.read_exact(&mut client_public_key).await?;
+        read_part.read_exact(&mut client_public_key).await?;
+        drop(read_part);
 
         let key_exchange = KeyExchange::new();
         let server_public = key_exchange.get_public_key();
@@ -482,10 +507,11 @@ where
         let mut response = Vec::new();
         response.extend_from_slice(&(server_public.len() as u32).to_be_bytes());
         response.extend_from_slice(&server_public);
-
-        sock.write_all(&response).await?;
-        sock.flush().await?;
-        drop(sock);
+        
+        let mut write_part = socket.write_part.lock().await;
+        write_part.write_all(&response).await?;
+        write_part.flush().await?;
+        drop(write_part);
 
         let shared_secret = key_exchange.compute_shared_secret(&client_public_key);
         Ok(Encryptor::new(&shared_secret).expect("Failed to create encryptor"))
@@ -532,8 +558,6 @@ where
                 .new_session(S::empty(session_id.clone()));
             tsocket.session_id = Some(session_id.clone());
 
-            self.keep_alive_pool.add(tsocket.clone()).await;
-            // Send OK response with new session ID
             let mut ok = P::ok();
             ok.session_id(Some(session_id));
             tsocket.send(ok).await?;
@@ -558,7 +582,6 @@ where
                 }
                 tsocket.session_id = Some(id);
                 tsocket.send(P::ok()).await?;
-                self.keep_alive_pool.add(tsocket.clone()).await;
                 return Ok(encryptor);
             }
             return Err(Error::InvalidSessionId(id));
@@ -689,6 +712,12 @@ where
                                 println!("Client disconnected.");
                                 break;
                             }
+
+                            if e == &Error::ReadTimeout {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                continue;
+                            }
+
                             let sources = HandlerSources {
                                 socket: tsocket.clone(),
                                 pools: PoolRef(pools.clone()),
@@ -700,6 +729,14 @@ where
                         let packet = resp.unwrap();
 
                         if packet.header() == P::keep_alive().header() {
+                            if let Some(first_ka_packet) = packet.body().is_first_keep_alive_packet
+                            {
+                                if first_ka_packet {
+                                    let socket_clone = tsocket.clone();
+                                    keep_alive_pool.add(socket_clone).await;
+                                }
+                            }
+
                             let mut response = P::keep_alive();
                             if let Some(id) = &tsocket.session_id {
                                 response.session_id(Some(id.clone()));
@@ -708,13 +745,6 @@ where
                                 eprintln!("Failed to send keepalive response: {e}");
                                 break;
                             }
-                            if let Some(first_ka_packet) = packet.body().is_first_keep_alive_packet
-                            {
-                                if first_ka_packet {
-                                    let socket_clone = tsocket.clone();
-                                    keep_alive_pool.add(socket_clone).await;
-                                }
-                            }
                         } else {
                             let sources = HandlerSources {
                                 socket: tsocket.clone(),
@@ -722,17 +752,14 @@ where
                                 resources: resources.clone(),
                             };
 
-                            // Get all handlers for this packet type
                             let handlers =
                                 handler_registry::get_handlers::<P, S, R>(&packet.header());
 
                             if !handlers.is_empty() {
-                                // Run all handlers for this packet type
                                 for handler in handlers {
                                     handler(sources.clone(), packet.clone()).await;
                                 }
                             } else {
-                                // Fall back to default handler if no registered handlers
                                 ok_handler(sources, packet).await;
                             }
                         }

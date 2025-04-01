@@ -47,6 +47,9 @@ pub enum Error {
     #[error("Broadcast: {0}")]
     Broadcast(String),
     
+    #[error("Read timeout")]
+    ReadTimeout,
+    
     #[error("{0}")]
     Error(String),
 }
