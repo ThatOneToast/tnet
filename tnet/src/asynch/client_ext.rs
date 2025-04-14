@@ -7,19 +7,21 @@ use crate::{errors::Error, packet};
 use super::client::AsyncClient;
 
 #[derive(Clone)]
-pub struct AsyncClientRef<P: packet::Packet>(Arc<RwLock<AsyncClient<P>>>);
+pub struct AsyncClientRef<P: packet::Packet, R: Clone + Default + Send + Sync + 'static>(
+    Arc<RwLock<AsyncClient<P, R>>>,
+);
 
-impl<P: packet::Packet> AsyncClientRef<P> {
+impl<P: packet::Packet, R: Clone + Default + Send + Sync> AsyncClientRef<P, R> {
     #[must_use]
-    pub fn new(client: AsyncClient<P>) -> Self {
+    pub fn new(client: AsyncClient<P, R>) -> Self {
         Self(Arc::new(RwLock::new(client)))
     }
 
-    pub async fn write(&mut self) -> tokio::sync::RwLockWriteGuard<'_, AsyncClient<P>> {
+    pub async fn write(&mut self) -> tokio::sync::RwLockWriteGuard<'_, AsyncClient<P, R>> {
         self.0.write().await
     }
 
-    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, AsyncClient<P>> {
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, AsyncClient<P, R>> {
         self.0.read().await
     }
 

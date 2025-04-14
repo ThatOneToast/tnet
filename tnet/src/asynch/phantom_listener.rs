@@ -2,14 +2,11 @@ use crate::packet::{Packet, PacketBody};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
-    errors::Error,
-    phantom::PhantomPacket,
-    prelude::AsyncListener,
-    resources::Resource,
-    session::Session,
-    wrap_handler,
+    errors::Error, phantom::PhantomPacket, prelude::AsyncListener, resources::Resource,
+    session::Session, wrap_handler,
 };
 
 use super::{listener::HandlerSources, phantom_client::AsyncPhantomClient};
@@ -38,6 +35,19 @@ pub struct PhantomSession {
     id: String,
     timestamp: u64,
     lifespan: Duration,
+}
+
+impl Default for PhantomSession {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            lifespan: Duration::from_secs(3600),
+        }
+    }
 }
 
 impl Session for PhantomSession {
@@ -102,12 +112,9 @@ pub struct PhantomListener {
     pub server: AsyncListener<PhantomPacket, PhantomSession, PhantomResources>,
 }
 
-async fn ok(
-    sources: HandlerSources<PhantomSession, PhantomResources>,
-    packet: PhantomPacket,
-) {
+async fn ok(sources: HandlerSources<PhantomSession, PhantomResources>, packet: PhantomPacket) {
     println!("Phantom listener received packet: {:?}", packet);
-    let mut socket = sources.socket;
+    let socket = sources.socket;
 
     if packet.header.as_str() == "relay" {
         let sent_packet = match &packet.sent_packet {
@@ -138,9 +145,7 @@ async fn ok(
 
         println!(
             "Received a relay request from {:?} -> {}:{}",
-            socket.addr,
-            client_config.server_addr,
-            client_config.server_port
+            socket.addr, client_config.server_addr, client_config.server_port
         );
 
         // Create a new phantom client for the target server
@@ -169,12 +174,13 @@ async fn ok(
                         );
 
                         // Convert the response to a string
-                        let response_str = String::from_utf8(response_data).expect("Failed to convert response data to string");
+                        let response_str = String::from_utf8(response_data)
+                            .expect("Failed to convert response data to string");
                         println!("Response content: {}", response_str);
 
                         // Create a relay-response packet
                         let response_packet = PhantomPacket {
-                            header: "relay-response".to_string(), 
+                            header: "relay-response".to_string(),
                             body: PacketBody::default(),
                             sent_packet: None,
                             recv_packet: Some(response_str),
@@ -216,11 +222,8 @@ async fn ok(
     }
 }
 
-async fn bad(
-    sources: HandlerSources<PhantomSession, PhantomResources>,
-    error: Error,
-) {
-    let mut socket = sources.socket;
+async fn bad(sources: HandlerSources<PhantomSession, PhantomResources>, error: Error) {
+    let socket = sources.socket;
     eprintln!("Error in phantom listener: {error}");
     let _ = socket.send(PhantomPacket::error(error)).await;
 }

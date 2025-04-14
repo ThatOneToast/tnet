@@ -34,22 +34,22 @@ pub enum Error {
 
     #[error("Invalid Client Config - There was none")]
     UnwrappedInvalidClientConfig,
-    
+
     #[error("Invalid pool {0}")]
-    InvalidPool(String),        
-    
+    InvalidPool(String),
+
     #[error("Failed to send packet {0}")]
     FailedPacketSend(String),
-    
+
     #[error("Failed to read packet {0}")]
     FailedPacketRead(String),
-    
+
     #[error("Broadcast: {0}")]
     Broadcast(String),
-    
+
     #[error("Read timeout")]
     ReadTimeout,
-    
+
     #[error("{0}")]
     Error(String),
 }

@@ -63,7 +63,7 @@ impl Packet for TestPacket {
 }
 
 async fn handle_ok(sources: HandlerSources<PhantomSession, PhantomResources>, packet: TestPacket) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     println!("Endpoint server received packet: {:?}", packet);
 
     // Return the data from the packet in the response, handling "TEST" packets specially
@@ -86,12 +86,15 @@ async fn handle_ok(sources: HandlerSources<PhantomSession, PhantomResources>, pa
 }
 
 async fn handle_error(sources: HandlerSources<PhantomSession, PhantomResources>, error: Error) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     println!("Endpoint server error: {:?}", error);
     if let Err(e) = socket.send(TestPacket::error(error)).await {
         eprintln!("Failed to send error response: {}", e);
     }
 }
+
+#[derive(Clone, Default)]
+struct Resources;
 
 // Test with no authentication to the endpoint
 #[tokio::test]
@@ -153,7 +156,7 @@ async fn test_phantom_relay_no_auth() {
     let phantom_packet = PhantomPacket::produce_from_conf(&phantom_conf, &test_packet);
 
     // 6. Connect to phantom server and send the relay request
-    let mut client = AsyncClient::<PhantomPacket>::new("127.0.0.1", phantom_port)
+    let mut client = AsyncClient::<PhantomPacket, Resources>::new("127.0.0.1", phantom_port)
         .await
         .expect("Failed to connect to phantom server");
 
@@ -246,7 +249,7 @@ async fn test_phantom_relay_with_auth() {
     let phantom_packet = PhantomPacket::produce_from_conf(&phantom_conf, &test_packet);
 
     // 6. Connect to phantom server and send the relay request
-    let mut client = AsyncClient::<PhantomPacket>::new("127.0.0.1", phantom_port)
+    let mut client = AsyncClient::<PhantomPacket, Resources>::new("127.0.0.1", phantom_port)
         .await
         .expect("Failed to connect to phantom server");
 
@@ -351,7 +354,7 @@ async fn test_phantom_relay_with_auth_and_encryption() {
     let phantom_packet = PhantomPacket::produce_from_conf(&phantom_conf, &test_packet);
 
     // 6. Connect to phantom server and send the relay request
-    let mut client = AsyncClient::<PhantomPacket>::new("127.0.0.1", phantom_port)
+    let mut client = AsyncClient::<PhantomPacket, Resources>::new("127.0.0.1", phantom_port)
         .await
         .expect("Failed to connect to phantom server");
 
@@ -451,7 +454,7 @@ async fn test_phantom_relay_auth_failure() {
     let phantom_packet = PhantomPacket::produce_from_conf(&phantom_conf, &test_packet);
 
     // 6. Connect to phantom server and send the relay request
-    let mut client = AsyncClient::<PhantomPacket>::new("127.0.0.1", phantom_port)
+    let mut client = AsyncClient::<PhantomPacket, Resources>::new("127.0.0.1", phantom_port)
         .await
         .expect("Failed to connect to phantom server");
 

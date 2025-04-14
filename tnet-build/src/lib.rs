@@ -38,7 +38,6 @@ impl PacketScanner {
 
     /// Scan directories for tpacket attributes and generate a TnetPacket implementation
     pub fn run(&self) -> io::Result<PathBuf> {
-        // Set up cargo directives for rebuilding if source changes
         if self.config.rerun_if_changed {
             for dir in &self.config.src_dirs {
                 println!("cargo:rerun-if-changed={}", dir.display());
@@ -46,35 +45,34 @@ impl PacketScanner {
             println!("cargo:rerun-if-changed=build.rs");
         }
 
-        // Find all rust files
+        let temp_dir = std::env::temp_dir().join("tnet_registry");
+        let trigger_file = temp_dir.join("tnet_rebuild_trigger");
+        println!("cargo:rerun-if-changed={}", trigger_file.display());
+
         let mut rust_files = Vec::new();
         for dir in &self.config.src_dirs {
             self.collect_rust_files(dir, &mut rust_files)?;
         }
 
-        // Find packet types
+        self.clean_marker_files()?;
+
         let packet_types = self.find_packet_types(&rust_files)?;
 
         let cache_path = std::path::Path::new("target").join(".tnet_packet_cache.json");
         if let Ok(cache_json) = serde_json::to_string(&packet_types) {
-            // Try to save, but don't fail if we can't
             let _ = std::fs::create_dir_all("target");
             let _ = std::fs::write(&cache_path, cache_json);
         }
 
-        // Generate the TnetPacket implementation
         let output_content = self.generate_tnet_packet_code(&packet_types);
 
-        // Get output directory from environment or config
         let out_dir = match std::env::var("OUT_DIR") {
             Ok(dir) => PathBuf::from(dir),
             Err(_) => self.config.out_dir.clone(),
         };
 
-        // Create output directory if it doesn't exist
         fs::create_dir_all(&out_dir)?;
 
-        // Write the output file
         let output_path = out_dir.join("tnet_packet.rs");
         println!(
             "cargo:warning=Writing TnetPacket to {}",
@@ -89,6 +87,42 @@ impl PacketScanner {
         );
 
         Ok(output_path)
+    }
+
+    fn clean_marker_files(&self) -> io::Result<()> {
+        // Clean temp directory markers
+        let temp_dir = std::env::temp_dir().join("tnet_registry");
+        if temp_dir.exists() {
+            println!(
+                "cargo:warning=Cleaning marker files in {}",
+                temp_dir.display()
+            );
+            if let Ok(entries) = fs::read_dir(&temp_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().is_some_and(|ext| ext == "packet") {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+
+        // Clean target directory markers
+        let target_dir = std::path::Path::new("target/.tpacket_markers");
+        if target_dir.exists() {
+            println!(
+                "cargo:warning=Cleaning marker files in {}",
+                target_dir.display()
+            );
+            if let Ok(entries) = fs::read_dir(target_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().is_some_and(|ext| ext == "marker") {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Find all Rust files in the given directory
@@ -110,17 +144,14 @@ impl PacketScanner {
 
     fn find_packet_types(&self, files: &[PathBuf]) -> io::Result<Vec<(String, String)>> {
         let mut packet_types = Vec::new();
-        let mut active_packet_fields = std::collections::HashSet::new();
 
         println!(
             "cargo:warning=Scanning {} files for packet types",
             files.len()
         );
 
-        // First, scan all files to build a set of active packet field names
+        // Scan all Rust files and extract #[tpacket] structs
         for file in files {
-            println!("cargo:warning=Looking at file: {}", file.display());
-
             if let Ok(content) = fs::read_to_string(file) {
                 if content.contains("#[tpacket") {
                     println!(
@@ -132,7 +163,7 @@ impl PacketScanner {
                     let lines = content.lines().collect::<Vec<_>>();
                     for (i, line) in lines.iter().enumerate() {
                         if line.contains("#[tpacket") {
-                            // Check for custom name in the attribute
+                            // Extract custom name from the attribute if present
                             let mut custom_name = None;
                             if line.contains("name =") {
                                 if let Some(name_start) = line.find("name = \"") {
@@ -145,7 +176,7 @@ impl PacketScanner {
                                 }
                             }
 
-                            // Now check the next line for struct definition
+                            // Look for struct definition in subsequent lines
                             if i + 1 < lines.len() {
                                 let next_line = lines[i + 1];
                                 if next_line.contains("struct ") {
@@ -162,9 +193,6 @@ impl PacketScanner {
                                                 Some(name) => name,
                                                 None => to_snake_case(struct_name),
                                             };
-
-                                            // Mark this as an active #[tpacket] struct
-                                            active_packet_fields.insert(field_name.clone());
 
                                             // Try to construct the full type path based on file location
                                             let file_path = file.to_string_lossy();
@@ -189,13 +217,17 @@ impl PacketScanner {
                                             let full_type =
                                                 format!("{}::{}", adjusted_path, struct_name);
 
+                                            // Add to packet types
+                                            packet_types
+                                                .push((field_name.clone(), full_type.clone()));
+
+                                            // Also create a new marker file for this #[tpacket] struct
+                                            self.create_marker_file(&field_name, &full_type)?;
+
                                             println!(
-                                                "cargo:warning=Found active packet in source: {} at {}",
+                                                "cargo:warning=Found packet: {} at {}",
                                                 field_name, full_type
                                             );
-
-                                            // Add to packet types directly from source scanning
-                                            packet_types.push((field_name, full_type));
                                         }
                                     }
                                 }
@@ -203,235 +235,174 @@ impl PacketScanner {
                         }
                     }
                 }
-            }
-        }
-
-        // Now scan temp directory for registrations
-        // But only use ones that are still active
-        let temp_dir = std::env::temp_dir().join("tnet_registry");
-        if let Ok(entries) = std::fs::read_dir(temp_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().is_some_and(|ext| ext == "packet") {
-                    if let Some(stem) = path.file_stem() {
-                        if let Some(field_name) = stem.to_str() {
-                            // Check if this is still an active #[tpacket] struct
-                            if active_packet_fields.contains(field_name) {
-                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                    // Check if the content has a custom field name marker
-                                    let parts: Vec<&str> = content.split('|').collect();
-
-                                    let type_path = parts[0].trim();
-                                    let actual_field_name = if parts.len() > 1 {
-                                        parts[1].trim()
-                                    } else {
-                                        field_name
-                                    };
-
-                                    // Only add if not already in the list
-                                    if !packet_types.iter().any(|(f, _)| f == actual_field_name) {
-                                        packet_types.push((
-                                            actual_field_name.to_string(),
-                                            type_path.to_string(),
-                                        ));
-                                        println!(
-                                            "cargo:warning=Found packet from temp file: {} ({})",
-                                            actual_field_name, type_path
-                                        );
-                                    }
-                                }
-                            } else {
-                                println!(
-                                    "cargo:warning=Skipping inactive packet marker: {}",
-                                    field_name
-                                );
-                                // Clean up the marker file for inactive packets
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Also check target directory markers (but these are secondary to source scanning)
-        let target_dirs = [
-            std::path::Path::new("target/.tpacket_markers"),
-            std::path::Path::new("../../target/.tpacket_markers"),
-        ];
-
-        for dir in &target_dirs {
-            if dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_file() && path.extension().is_some_and(|ext| ext == "marker") {
-                            if let Some(stem) = path.file_stem() {
-                                if let Some(field_name) = stem.to_str() {
-                                    // Check if this is still an active #[tpacket] struct
-                                    if active_packet_fields.contains(field_name) {
-                                        if let Ok(content) = std::fs::read_to_string(&path) {
-                                            // Check if the content has a custom field name marker
-                                            let parts: Vec<&str> = content.split('|').collect();
-
-                                            let type_path = parts[0].trim();
-                                            let actual_field_name = if parts.len() > 1 {
-                                                parts[1].trim()
-                                            } else {
-                                                field_name
-                                            };
-
-                                            // Only add if not already in the list
-                                            if !packet_types
-                                                .iter()
-                                                .any(|(f, _)| f == actual_field_name)
-                                            {
-                                                packet_types.push((
-                                                    actual_field_name.to_string(),
-                                                    type_path.to_string(),
-                                                ));
-                                                println!(
-                                                    "cargo:warning=Found packet from target marker: {} ({})",
-                                                    actual_field_name, type_path
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        println!(
-                                            "cargo:warning=Skipping inactive packet marker in target: {}",
-                                            field_name
-                                        );
-                                        // Clean up the marker file for inactive packets
-                                        let _ = std::fs::remove_file(&path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Make the list of packet types unique by field name, keeping the first entry
-        let mut unique_packet_types = Vec::new();
-        let mut seen_fields = std::collections::HashSet::new();
-
-        for (field, path) in packet_types {
-            if !seen_fields.contains(&field) {
-                seen_fields.insert(field.clone());
-                unique_packet_types.push((field, path));
             }
         }
 
         // Log the result
         println!(
             "cargo:warning=Total packet types found: {}",
-            unique_packet_types.len()
+            packet_types.len()
         );
 
-        Ok(unique_packet_types)
+        Ok(packet_types)
+    }
+
+    fn create_marker_file(&self, field_name: &str, full_type: &str) -> io::Result<()> {
+        // Create temporary directory marker
+        let temp_dir = std::env::temp_dir().join("tnet_registry");
+        if !temp_dir.exists() {
+            fs::create_dir_all(&temp_dir)?;
+        }
+        let temp_file = temp_dir.join(format!("{}.packet", field_name));
+
+        // Store both the full path to the type and the field name
+        let data = format!("{}|{}", full_type, field_name);
+        fs::write(&temp_file, &data)?;
+
+        // Also write to target directory for persistence
+        let target_dir = PathBuf::from("target/.tpacket_markers");
+        if !target_dir.exists() {
+            fs::create_dir_all(&target_dir)?;
+        }
+        let target_file = target_dir.join(format!("{}.marker", field_name));
+        fs::write(&target_file, &data)?;
+
+        Ok(())
     }
 
     fn generate_tnet_packet_code(&self, packet_types: &[(String, String)]) -> String {
         let mut struct_fields = String::new();
         let mut default_fields = String::new();
-        // Remove these variables since we won't be generating getters and setters
-        // let mut getter_methods = String::new();
-        // let mut setter_methods = String::new();
 
         for (field_name, type_path) in packet_types {
-            // Create sanitized field identifier
             let field_ident = sanitize_identifier(field_name);
 
-            // Generate struct field using FULLY QUALIFIED PATH to avoid import conflicts
             writeln!(
                 &mut struct_fields,
                 r#"    /// Optional field for {} packets
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub {}: Option<{}>,
-                "#,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    pub {}: Option<{}>,
+                    "#,
                 field_name, field_ident, type_path
             )
             .unwrap();
 
-            // Add to default implementation
             writeln!(&mut default_fields, "            {}: None,", field_ident).unwrap();
-
-            // Remove getter method generation
-            // ...
-
-            // Remove setter method generation
-            // ...
         }
 
-        // Generate the TnetPacket implementation with fully qualified paths
-        // And remove references to getter and setter methods
         format!(
             r#"// This file is auto-generated. Do not edit manually.
 
-            /// Dynamic packet type that can contain registered packet types.
-            ///
-            /// This struct is automatically generated based on types marked with `#[tpacket]`.
-            #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
-            pub struct TnetPacket {{
-                /// The packet header (e.g., "LOGIN", "CHAT", "ERROR")
-                pub header: String,
+                        /// Dynamic packet type that can contain registered packet types.
+                        ///
+                        /// This struct is automatically generated based on types marked with `#[tpacket]`.
+                        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
+                        pub struct TnetPacket {{
+                            /// The packet header (e.g., "LOGIN", "CHAT", "ERROR")
+                            pub header: String,
 
-                /// Standard packet body with common fields
-                pub body: ::tnet::packet::PacketBody,
+                            /// Standard packet body with common fields
+                            pub body: ::tnet::packet::PacketBody,
 
-                {}
-            }}
+                            {}
+                        }}
 
-            impl ::std::default::Default for TnetPacket {{
-                fn default() -> Self {{
-                    Self {{
-                        header: "OK".to_string(),
-                        body: ::tnet::packet::PacketBody::default(),
-                        {}
-                    }}
-                }}
-            }}
+                        impl ::std::default::Default for TnetPacket {{
+                            fn default() -> Self {{
+                                Self {{
+                                    header: "OK".to_string(),
+                                    body: ::tnet::packet::PacketBody::default(),
+                                    {}
+                                }}
+                            }}
+                        }}
 
-            impl TnetPacket {{
-                /// Creates a new TnetPacket with the specified header.
-                pub fn new(header: impl Into<String>) -> Self {{
-                    Self {{
-                        header: header.into(),
-                        body: ::tnet::packet::PacketBody::default(),
-                        {}
-                    }}
-                }}
-            }}
+                        impl TnetPacket {{
+                            /// Creates a new TnetPacket with the specified header.
+                            pub fn new(header: impl Into<String>) -> Self {{
+                                Self {{
+                                    header: header.into(),
+                                    body: ::tnet::packet::PacketBody::default(),
+                                    {}
+                                }}
+                            }}
 
-            impl ::tnet::packet::Packet for TnetPacket {{
-                fn header(&self) -> String {{
-                    self.header.clone()
-                }}
+                            /// Sends this packet to the specified socket.
+                            ///
+                            /// # Arguments
+                            ///
+                            /// * `socket` - The socket to send the packet to
+                            ///
+                            /// # Returns
+                            ///
+                            /// * `Result<(), ::tnet::errors::Error>` - Success or failure of the send operation
+                            ///
+                            /// # Errors
+                            ///
+                            /// Returns an error if sending the packet fails
+                            pub async fn send_to<S: ::tnet::session::Session>(&self, socket: &mut ::tnet::asynch::socket::TSocket<S>) -> Result<(), ::tnet::errors::Error> {{
+                                socket.send(self.clone()).await
+                            }}
 
-                fn body(&self) -> ::tnet::packet::PacketBody {{
-                    self.body.clone()
-                }}
+                            /// Sends this packet to multiple sockets.
+                            ///
+                            /// # Arguments
+                            ///
+                            /// * `sockets` - A slice of sockets to send the packet to
+                            ///
+                            /// # Returns
+                            ///
+                            /// * `Result<(), ::tnet::errors::Error>` - Success or failure of the send operation
+                            ///
+                            /// # Errors
+                            ///
+                            /// Returns an error if sending the packet fails for any socket
+                            pub async fn send_batch<S: ::tnet::session::Session>(&self, sockets: &mut [&mut ::tnet::asynch::socket::TSocket<S>]) -> Result<(), ::tnet::errors::Error> {{
+                                let mut errors = Vec::new();
 
-                fn body_mut(&mut self) -> &mut ::tnet::packet::PacketBody {{
-                    &mut self.body
-                }}
+                                for socket in sockets.iter_mut() {{
+                                    if let Err(e) = socket.send(self.clone()).await {{
+                                        errors.push(e);
+                                    }}
+                                }}
 
-                fn ok() -> Self {{
-                    Self::new("OK")
-                }}
+                                if errors.is_empty() {{
+                                    Ok(())
+                                }} else {{
+                                    Err(::tnet::errors::Error::Broadcast(format!("Batch send errors: {{:?}}", errors)))
+                                }}
+                            }}
+                        }}
 
-                fn error(error: ::tnet::errors::Error) -> Self {{
-                    let mut packet = Self::new("ERROR");
-                    packet.body = ::tnet::packet::PacketBody::with_error_string(&error.to_string());
-                    packet
-                }}
+                        impl ::tnet::packet::Packet for TnetPacket {{
+                            fn header(&self) -> String {{
+                                self.header.clone()
+                            }}
 
-                fn keep_alive() -> Self {{
-                    Self::new("KEEPALIVE")
-                }}
-            }}
-            "#,
+                            fn body(&self) -> ::tnet::packet::PacketBody {{
+                                self.body.clone()
+                            }}
+
+                            fn body_mut(&mut self) -> &mut ::tnet::packet::PacketBody {{
+                                &mut self.body
+                            }}
+
+                            fn ok() -> Self {{
+                                Self::new("OK")
+                            }}
+
+                            fn error(error: ::tnet::errors::Error) -> Self {{
+                                let mut packet = Self::new("ERROR");
+                                packet.body = ::tnet::packet::PacketBody::with_error_string(&error.to_string());
+                                packet
+                            }}
+
+                            fn keep_alive() -> Self {{
+                                Self::new("KEEPALIVE")
+                            }}
+                        }}
+
+                        "#,
             struct_fields, default_fields, default_fields
         )
     }

@@ -167,7 +167,7 @@ pub struct ConnectionHandler {
 pub type MessageHandler<P> = Box<dyn Fn(&P) -> bool + Send + Sync>;
 
 /// Type alias for broadcast handling functions.
-pub type BroadcastHandler<P> = Box<dyn Fn(P) + Send + Sync>;
+pub type BroadcastHandler<P, R> = Box<dyn Fn(P, Arc<R>) + Send + Sync>;
 
 /// Configuration for reconnection behavior with exponential backoff.
 #[derive(Debug, Clone)]
@@ -245,11 +245,12 @@ impl Default for ReconnectionConfig {
 /// * `keep_alive_running` - Keep-alive active status
 /// * `response_rx` - Channel for receiving responses
 /// * `broadcast_handler` - Optional handler for broadcast messages
-pub struct AsyncClient<P>
+pub struct AsyncClient<P, R>
 where
     P: packet::Packet,
+    R: Clone + Default + Send + Sync + 'static,
 {
-    connection: ConnectionHandler,
+    pub connection: ConnectionHandler,
     pub(crate) encryption: ClientEncryption,
     session_id: Option<String>,
     user: Option<String>,
@@ -260,18 +261,20 @@ where
     keepalive_reconnect_needed: Arc<AtomicBool>,
     pub(crate) keepalive_reconnect_tx: Option<mpsc::Sender<()>>,
     response_rx: mpsc::Receiver<Vec<u8>>,
-    broadcast_handler: Option<Arc<BroadcastHandler<P>>>,
+    broadcast_handler: Option<Arc<BroadcastHandler<P, R>>>,
     broadcast_processor_running: Arc<AtomicBool>,
     reconnection_config: ReconnectionConfig,
     current_endpoint: Option<(String, u16)>,
     connection_closed: Arc<AtomicBool>,
     connection_stable: Arc<AtomicBool>,
+    pub resources: Arc<R>,
     _packet: PhantomData<P>,
 }
 
-impl<P> AsyncClient<P>
+impl<P, R> AsyncClient<P, R>
 where
     P: packet::Packet,
+    R: Clone + Default + Send + Sync + 'static,
 {
     /// Creates a new `AsyncClient` instance.
     ///
@@ -409,6 +412,7 @@ where
             connection_stable: Arc::new(AtomicBool::new(true)),
             keepalive_reconnect_tx: None,
             keepalive_reconnect_needed: Arc::new(AtomicBool::new(false)),
+            resources: Arc::new(R::default()),
             _packet: PhantomData,
         };
 
@@ -521,6 +525,20 @@ where
         self
     }
 
+    /// Configures resources for the client.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Resources for the client
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - The configured client instance
+    pub fn with_resources(mut self, resources: R) -> Self {
+        self.resources = Arc::new(resources);
+        self
+    }
+
     /// Adds authentication credentials to the client.
     ///
     /// # Arguments
@@ -582,7 +600,7 @@ where
     ///
     /// * The configured client with broadcast handling enabled
     #[must_use]
-    pub fn with_broadcast_handler(mut self, handler: BroadcastHandler<P>) -> Self {
+    pub fn with_broadcast_handler(mut self, handler: BroadcastHandler<P, R>) -> Self {
         self.broadcast_handler = Some(Arc::new(handler));
         self
     }
@@ -612,6 +630,7 @@ where
 
         // Get references to needed data
         let broadcast_handler = self.broadcast_handler.clone().unwrap();
+        let resources = self.resources.clone();
         let encryption = self.encryption.clone();
         let broadcast_running = self.broadcast_processor_running.clone();
         let connection_closed = self.connection_closed.clone();
@@ -651,7 +670,7 @@ where
                 };
 
                 if packet.is_broadcasting() {
-                    broadcast_handler(packet);
+                    broadcast_handler(packet, resources.clone());
                 } else if packet.header() == P::keep_alive().header() {
                 } else if let Err(e) = filtered_tx.send(bytes).await {
                     eprintln!("Failed to forward response: {}", e);
@@ -732,7 +751,7 @@ where
     ///
     /// * `AsyncClientRef<P>` - A reference-counted version of the client
     #[must_use]
-    pub fn convert_to_ref(self) -> AsyncClientRef<P> {
+    pub fn convert_to_ref(self) -> AsyncClientRef<P, R> {
         AsyncClientRef::new(self)
     }
 
@@ -1003,9 +1022,7 @@ where
                 self.connection_closed.store(true, Ordering::SeqCst);
                 Err(Error::ConnectionClosed)
             }
-            Err(_) => {
-                Err(Error::IoError("Receive operation timed out".to_string()))
-            }
+            Err(_) => Err(Error::IoError("Receive operation timed out".to_string())),
         }
     }
 

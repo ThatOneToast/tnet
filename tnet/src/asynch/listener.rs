@@ -56,7 +56,7 @@ where
 {
     pub socket: TSocket<S>,
     pub pools: PoolRef<S>,
-    pub resources: ResourceRef<R>,
+    pub resources: Arc<R>,
 }
 
 /// Type alias for the success handler function in the async listener.
@@ -103,10 +103,14 @@ pub type AsyncListenerErrorHandler<S, R> =
 ///     // Work with pools...
 /// }
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PoolRef<S: session::Session>(pub Arc<RwLock<HashMap<String, TSockets<S>>>>);
 
 impl<S: session::Session> PoolRef<S> {
+    pub fn new() -> Self {
+        Self(Arc::new(RwLock::new(HashMap::new())))
+    }
+
     pub async fn write(&mut self) -> RwLockWriteGuard<'_, HashMap<String, TSockets<S>>> {
         self.0.write().await
     }
@@ -159,45 +163,6 @@ impl<S: session::Session> PoolRef<S> {
     }
 }
 
-/// Thread-safe reference to shared resources.
-///
-/// Provides concurrent access to application resources that need to be shared
-/// across multiple connection handlers.
-///
-/// # Type Parameters
-///
-/// * `R` - The resource type implementing the `Resource` trait
-///
-/// # Example
-///
-/// ```rust
-/// use tnet::asynch::listener::ResourceRef;
-///
-/// async fn use_resources(resources: ResourceRef<MyResource>) {
-///     let resource_guard = resources.read().await;
-///     // Work with resources...
-/// }
-/// ```
-#[derive(Clone)]
-pub struct ResourceRef<R: resources::Resource>(pub Arc<RwLock<R>>);
-
-impl<R: resources::Resource + 'static> ResourceRef<R> {
-    /// Creates a new `ResourceRef` wrapping the provided resource.
-    pub fn new(resource: R) -> Self {
-        Self(Arc::new(RwLock::new(resource)))
-    }
-
-    /// Obtains a read lock on the resources.
-    pub async fn read(&self) -> RwLockReadGuard<R> {
-        self.0.read().await
-    }
-
-    /// Obtains a write lock on the resources.
-    pub async fn write(&self) -> RwLockWriteGuard<R> {
-        self.0.write().await
-    }
-}
-
 /// The main server component for handling network connections and packet processing.
 ///
 /// `AsyncListener` provides a robust framework for:
@@ -244,7 +209,7 @@ where
     sessions: Arc<RwLock<Sessions<S>>>,
     pub keep_alive_pool: TSockets<S>,
     pub pools: Arc<RwLock<HashMap<String, TSockets<S>>>>,
-    resources: ResourceRef<R>,
+    resources: Arc<R>,
     _packet: PhantomData<P>,
 }
 
@@ -297,7 +262,7 @@ where
             sessions,
             keep_alive_pool: TSockets::new(),
             pools: Arc::new(RwLock::new(HashMap::new())),
-            resources: ResourceRef::new(R::new()),
+            resources: Arc::new(R::new()),
             _packet: PhantomData,
         }
     }
@@ -426,7 +391,7 @@ where
     /// * `Self` - The configured listener instance
     #[must_use]
     pub fn with_resource(mut self, resource: R) -> Self {
-        self.resources = ResourceRef::new(resource);
+        self.resources = Arc::new(resource);
         self
     }
 
@@ -464,7 +429,7 @@ where
     /// # Returns
     ///
     /// * `ResourceRef<R>` - Reference to the shared resources
-    pub fn get_resources(&self) -> ResourceRef<R> {
+    pub fn get_resources(&self) -> Arc<R> {
         self.resources.clone()
     }
 
@@ -480,9 +445,8 @@ where
     ///
     /// * `std::io::Result<Encryptor>` - The configured encryptor or an error
     async fn handle_encryption_handshake(&self, socket: &TSocket<S>) -> std::io::Result<Encryptor> {
-
         let mut read_part = socket.read_part.lock().await;
-        
+
         // Read length prefix
         let mut length_buf = [0u8; 4];
         read_part.read_exact(&mut length_buf).await?;
@@ -507,7 +471,7 @@ where
         let mut response = Vec::new();
         response.extend_from_slice(&(server_public.len() as u32).to_be_bytes());
         response.extend_from_slice(&server_public);
-        
+
         let mut write_part = socket.write_part.lock().await;
         write_part.write_all(&response).await?;
         write_part.flush().await?;
@@ -686,10 +650,10 @@ where
 
             println!("Accepted connection from {addr}");
 
-            let mut tsocket = TSocket::new(socket, self.sessions.clone());
+            let mut tsocket = TSocket::new(socket, S::default());
             let ok_handler = self.ok_handler.clone();
             let error_handler = self.error_handler.clone();
-            let mut keep_alive_pool = self.keep_alive_pool.clone();
+            let keep_alive_pool = self.keep_alive_pool.clone();
             let pools = self.pools.clone();
             let resources = self.resources.clone();
 

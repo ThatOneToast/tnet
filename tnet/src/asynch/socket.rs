@@ -6,14 +6,14 @@ use tokio::{
         TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, RwLockWriteGuard},
 };
 
 use crate::{
     encrypt::Encryptor,
     errors::Error,
     packet::Packet,
-    session::{self, Sessions},
+    session::{self, Session},
 };
 
 /// A thread-safe collection of network sockets that can be shared across multiple tasks.
@@ -79,7 +79,7 @@ where
     /// sockets.add(socket).await;
     /// # }
     /// ```
-    pub async fn add(&mut self, socket: TSocket<S>) {
+    pub async fn add(&self, socket: TSocket<S>) {
         self.sockets.write().await.push(socket);
     }
 
@@ -192,7 +192,7 @@ where
             );
 
             // Send to each socket
-            for mut socket in sockets_to_broadcast {
+            for socket in sockets_to_broadcast {
                 match socket.send(broadcast_packet.clone()).await {
                     Ok(_) => println!("DEBUG: Successfully sent broadcast to a socket"),
                     Err(e) => {
@@ -218,6 +218,15 @@ where
 
     pub async fn iter_mut(&mut self) -> impl Iterator<Item = TSocket<S>> {
         self.sockets.write().await.clone().into_iter()
+    }
+
+    pub async fn find_by_session_id(&self, session_id: &str) -> Option<TSocket<S>> {
+        self.sockets
+            .read()
+            .await
+            .clone()
+            .into_iter()
+            .find(|socket| socket.session_id().unwrap() == session_id)
     }
 }
 
@@ -300,7 +309,7 @@ where
     pub session_id: Option<String>,
     pub encryptor: Option<Encryptor>,
     pub addr: String,
-    sessions: Arc<RwLock<Sessions<S>>>,
+    pub session: Arc<RwLock<S>>,
 }
 
 impl<S> TSocket<S>
@@ -317,7 +326,7 @@ where
     /// # Returns
     ///
     /// * A new `TSocket` instance
-    pub fn new(socket: TcpStream, sessions: Arc<RwLock<Sessions<S>>>) -> Self {
+    pub fn new(socket: TcpStream, session: S) -> Self {
         let addr = socket.peer_addr().unwrap().to_string();
         let (read, write) = socket.into_split();
 
@@ -327,7 +336,7 @@ where
             session_id: None,
             encryptor: None,
             addr,
-            sessions,
+            session: Arc::new(RwLock::new(session)),
         }
     }
 
@@ -361,20 +370,6 @@ where
         self
     }
 
-    /// Retrieves the current session associated with this socket.
-    ///
-    /// # Returns
-    ///
-    /// * An Option containing the current session if it exists
-    pub async fn get_session(&self) -> Option<S> {
-        if let Some(id) = &self.session_id {
-            let sessions = self.sessions.read().await;
-            sessions.get_session(id).cloned()
-        } else {
-            None
-        }
-    }
-
     /// Updates the current session using the provided function.
     ///
     /// # Arguments
@@ -390,17 +385,14 @@ where
     /// Returns `Error::InvalidSessionId` if no session ID is set or if the session ID is invalid
     pub async fn update_session<F, T>(&self, f: F) -> Result<T, Error>
     where
-        F: FnOnce(&mut S) -> T + Send,
+        F: FnOnce(RwLockWriteGuard<'_, S>) -> T + Send,
     {
-        if let Some(id) = &self.session_id {
-            let mut sessions = self.sessions.write().await;
-            sessions.get_session_mut(id).map_or_else(
-                || Err(Error::InvalidSessionId(id.clone())),
-                |session| Ok(f(session)),
-            )
-        } else {
-            Err(Error::InvalidSessionId("No session ID".to_string()))
-        }
+        let session = self.session.write().await;
+        Ok(f(session))
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     /// Sends a packet through the socket, with optional encryption.
@@ -416,7 +408,7 @@ where
     /// # Errors
     ///
     /// Returns `Error::IoError` if writing to the socket fails
-    pub async fn send<P: Packet>(&mut self, packet: P) -> Result<(), Error> {
+    pub async fn send<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let data = self
             .encryptor
             .as_ref()
@@ -452,7 +444,7 @@ where
     ///
     /// Returns `Error::IoError` if reading from the socket fails
     /// Returns `Error::ConnectionClosed` if the connection is closed
-    pub async fn recv<P: Packet>(&mut self) -> Result<P, Error> {
+    pub async fn recv<P: Packet>(&self) -> Result<P, Error> {
         let mut buf = vec![0; 4096];
         let n = {
             let mut socket = self
@@ -502,7 +494,7 @@ where
     /// # Errors
     ///
     /// Returns `Error::IoError` if writing to the socket fails
-    pub async fn send_raw(&mut self, packet: Vec<u8>) -> Result<(), Error> {
+    pub async fn send_raw(&self, packet: Vec<u8>) -> Result<(), Error> {
         let mut socket = self.write_part.lock().await;
         socket
             .write_all(&packet)
@@ -526,7 +518,7 @@ where
     ///
     /// Returns `Error::IoError` if reading from the socket fails
     /// Returns `Error::ConnectionClosed` if the connection is closed
-    pub async fn recv_raw(&mut self) -> Result<Vec<u8>, Error> {
+    pub async fn recv_raw(&self) -> Result<Vec<u8>, Error> {
         let mut buf = vec![0; 4096];
         let n = {
             let mut socket = self.read_part.lock().await;
@@ -557,21 +549,18 @@ where
     }
 }
 
-impl<S> AsMut<Self> for TSocket<S>
-where
-    S: session::Session,
-{
-    fn as_mut(&mut self) -> &mut Self {
-        self
+impl<S: Session> PartialEq for TSocket<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id() == other.session_id()
     }
 }
 
-pub trait BroadcastExt<S: session::Session> {
+pub trait TSocketExt<S: session::Session> {
     #[allow(async_fn_in_trait)]
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error>;
 }
 
-impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>) {
+impl<S: session::Session> TSocketExt<S> for (TSocket<S>, TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();
@@ -594,7 +583,7 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>) {
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S>) {
+impl<S: session::Session> TSocketExt<S> for (TSocket<S>, TSocket<S>, TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();
@@ -620,7 +609,7 @@ impl<S: session::Session> BroadcastExt<S> for (TSocket<S>, TSocket<S>, TSocket<S
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for (&TSocket<S>, &TSocket<S>) {
+impl<S: session::Session> TSocketExt<S> for (&TSocket<S>, &TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();
@@ -643,7 +632,7 @@ impl<S: session::Session> BroadcastExt<S> for (&TSocket<S>, &TSocket<S>) {
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for (&TSocket<S>, &TSocket<S>, &TSocket<S>) {
+impl<S: session::Session> TSocketExt<S> for (&TSocket<S>, &TSocket<S>, &TSocket<S>) {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();
@@ -669,7 +658,7 @@ impl<S: session::Session> BroadcastExt<S> for (&TSocket<S>, &TSocket<S>, &TSocke
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for &[TSocket<S>] {
+impl<S: session::Session> TSocketExt<S> for &[TSocket<S>] {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();
@@ -691,7 +680,7 @@ impl<S: session::Session> BroadcastExt<S> for &[TSocket<S>] {
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for [TSocket<S>] {
+impl<S: session::Session> TSocketExt<S> for [TSocket<S>] {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();
@@ -713,7 +702,7 @@ impl<S: session::Session> BroadcastExt<S> for [TSocket<S>] {
     }
 }
 
-impl<S: session::Session> BroadcastExt<S> for [&TSocket<S>] {
+impl<S: session::Session> TSocketExt<S> for [&TSocket<S>] {
     async fn broadcast<P: Packet>(&self, packet: P) -> Result<(), Error> {
         let mut errors = Vec::new();
         let packet = packet.set_broadcasting();

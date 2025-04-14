@@ -17,7 +17,7 @@ pub use crate::{
         client::{AsyncClient, ClientEncryption, EncryptionConfig},
         listener::{
             AsyncListener, AsyncListenerErrorHandler, AsyncListenerOkHandler, HandlerSources,
-            PoolRef, ResourceRef,
+            PoolRef
         },
         phantom_client::AsyncPhantomClient,
         phantom_listener::{PhantomListener, PhantomResources, PhantomSession},

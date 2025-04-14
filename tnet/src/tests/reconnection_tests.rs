@@ -14,6 +14,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+#[derive(Clone, Default)]
+struct Resources;
+
 // Define test packet
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TestPacket {
@@ -68,6 +71,12 @@ struct TestSession {
     lifespan: Duration,
 }
 
+impl Default for TestSession {
+    fn default() -> Self {
+        Self::empty("".to_string())
+    }
+}
+
 impl ImplSession for TestSession {
     fn id(&self) -> &str {
         &self.id
@@ -111,7 +120,7 @@ async fn handle_ok(
     sources: HandlerSources<TestSession, TestResource>,
     packet: TestPacket,
 ) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     println!("Server received packet: {:?}", packet);
 
     let mut response = TestPacket::ok();
@@ -135,7 +144,7 @@ async fn handle_error(
     error: Error,
 ) {
     println!("Server received error: {:?}", error);
-    let mut socket = sources.socket;
+    let socket: TSocket<TestSession> = sources.socket;
     let _ = socket.send(TestPacket::error(error)).await;
 }
 
@@ -178,7 +187,7 @@ async fn test_basic_reconnection() {
     sleep(Duration::from_millis(500)).await;
 
     // Create a client with reconnection enabled
-    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    let client_result = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", port).await;
     if client_result.is_err() {
         println!("Skipping test_basic_reconnection as we can't create initial client");
         let _ = server_stop_tx.send(());
@@ -279,7 +288,7 @@ async fn test_fallback_endpoints() {
     sleep(Duration::from_millis(500)).await;
 
     // Try to create a client pointing to the primary (non-existent) server
-    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", primary_port).await;
+    let client_result = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", primary_port).await;
 
     // This should fail since the primary server isn't running
     let mut client = match client_result {
@@ -292,7 +301,7 @@ async fn test_fallback_endpoints() {
             println!("Creating client with fallback configuration");
 
             // For testing, we'll create a client connected to the fallback directly
-            match AsyncClient::<TestPacket>::new("127.0.0.1", fallback_port).await {
+            match AsyncClient::<TestPacket, Resources>::new("127.0.0.1", fallback_port).await {
                 Ok(client) => client.with_reconnection(ReconnectionConfig {
                     endpoints: vec![("127.0.0.1".to_string(), fallback_port)],
                     auto_reconnect: true,
@@ -372,7 +381,7 @@ async fn test_exponential_backoff() {
     println!("Attempting to connect to non-existent server to test backoff");
 
     // Try to connect - this should fail
-    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    let client_result = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", port).await;
     assert!(
         client_result.is_err(),
         "Expected initial connection to fail"
@@ -385,7 +394,7 @@ async fn test_exponential_backoff() {
     sleep(Duration::from_millis(1000)).await;
 
     // Now try again - this should succeed because the server is running
-    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    let client_result = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", port).await;
     if let Ok(mut client) = client_result {
         let request = TestPacket::ok();
         match client.send_recv(request).await {
@@ -418,7 +427,7 @@ async fn test_session_restoration() {
     sleep(Duration::from_millis(500)).await;
 
     // Create a client
-    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    let client_result = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", port).await;
     if client_result.is_err() {
         println!("Skipping test_session_restoration as we can't create initial client");
         let _ = server_stop_tx.send(());
@@ -520,41 +529,66 @@ async fn test_session_restoration() {
 // Test 5: Maximum retries exceeded - modified to be more robust
 #[tokio::test]
 async fn test_max_retries_exceeded() {
-    let port = 9095;
+    // Let's start an actual server first that we can connect to
+    let server_port = 9096; // Use a different port for the server
+    let nonexistent_port = 19096; // Use a port that definitely has no server
+    
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let server_handle = start_test_server(server_port, stop_rx).await;
+    
+    // Create a client that connects to the valid server
+    let mut client = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", server_port)
+        .await
+        .expect("Should connect to test server");
+        
+    // Now configure it with reconnection settings pointing to our non-existent server port
+    client = client.with_reconnection(ReconnectionConfig {
+        endpoints: vec![("127.0.0.1".to_string(), nonexistent_port)], // Use a port that definitely has no server
+        auto_reconnect: true,
+        max_attempts: Some(2), // Set a low number of max attempts
+        initial_retry_delay: 0.1,
+        max_retry_delay: 0.5,
+        backoff_factor: 1.5,
+        jitter: 0.1,
+        reinitialize: true,
+    });
+    
+    // Kill our server to force reconnection to the bad endpoint
+    server_handle.abort();
+    
+    // Give the server time to fully shut down
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
+    // Try to use the client, which should attempt reconnection up to max_attempts
+    let start_time = Instant::now();
+    let request = TestPacket::ok();
 
-    // This test is simpler - we'll just try to connect to a port where no server is running
-    println!("Testing max retries exceeded behavior");
+    // This should fail after trying the reconnection endpoints and hitting max retries
+    let result = client.send_recv(request).await;
+    let elapsed = start_time.elapsed();
 
-    // For this test, we still need a client struct to configure reconnection parameters
-    // but the initial connection attempt will fail
+    // The operation should fail since there's no server at the reconnection endpoint
+    assert!(result.is_err(), "Expected send to fail after max retries");
+    println!("Operation failed with error: {:?}", result);
 
-
-
-
-    // This test is mainly to ensure the client handles max retry limits gracefully
-    // We'll make an attempt to connect to a non-existent server
-
-    println!("Attempting to connect to a non-existent server");
-
-    // Since we can't connect to anything real, we'll simulate the behavior
-    // by observing that a connection to a non-existent server fails
-
-    let result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    // Verify that we didn't wait too long (indicating max retries was respected)
+    // With 2 attempts, initial delay 0.1s, and backoff 1.5, we expect roughly:
+    // First try + 0.1s + second try = less than 1 second total
+    // Allow some overhead for processing time
     assert!(
-        result.is_err(),
-        "Expected connection to non-existent server to fail"
+        elapsed < Duration::from_secs(3),
+        "Took too long to fail: {:?}, suggesting max retries was not respected",
+        elapsed
     );
 
-    println!("Verified that connection to non-existent server fails as expected");
-
-    // The actual logic for max retries is handled within the client.rs implementation
-    // and is exercised by the other tests in a more realistic way
+    println!("Verified that max retries limit was respected");
+    println!("Operation failed after {:?} as expected", elapsed);
 }
 
 // Test 6: Reconnection after server downtime
 #[tokio::test]
 async fn test_reconnection_after_downtime() {
-    let port = 9096;
+    let port = 9097; // Changed from 9096 to avoid port conflict
 
     // Start a server
     let (server_stop_tx, server_stop_rx) = oneshot::channel();
@@ -564,7 +598,7 @@ async fn test_reconnection_after_downtime() {
     sleep(Duration::from_millis(500)).await;
 
     // Create a client with reconnection enabled
-    let client_result = AsyncClient::<TestPacket>::new("127.0.0.1", port).await;
+    let client_result = AsyncClient::<TestPacket, Resources>::new("127.0.0.1", port).await;
     if client_result.is_err() {
         println!("Skipping test_reconnection_after_downtime as we can't create initial client");
         let _ = server_stop_tx.send(());

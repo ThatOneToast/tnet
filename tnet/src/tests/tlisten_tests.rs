@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use crate::{
     asynch::listener::{AsyncListener, HandlerSources},
@@ -10,6 +10,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+
+#[derive(Clone, Default)]
+struct Resources;
+
 
 // Define test packet type
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +69,12 @@ pub struct MacroTestSession {
     lifespan: Duration,
 }
 
+impl Default for MacroTestSession{
+    fn default() -> Self {
+        Self::empty("".to_string())
+    }
+}
+
 impl ImplSession for MacroTestSession {
     fn id(&self) -> &str {
         &self.id
@@ -93,12 +103,12 @@ impl ImplSession for MacroTestSession {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct MacroTestResource {
-    data: Vec<String>,
+    data: Arc<Mutex<Vec<String>>>,
 }
 
 impl ImplResource for MacroTestResource {
     fn new() -> Self {
-        Self { data: Vec::new() }
+        Self { data: Arc::new(Mutex::new(Vec::new())) }
     }
 }
 
@@ -110,7 +120,7 @@ async fn handle_hello(
     sources: HandlerSources<MacroTestSession, MacroTestResource>,
     packet: MacroTestPacket,
 ) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     println!("HELLO handler called with packet: {:?}", packet);
 
     // Increment our counter to verify this was called
@@ -128,7 +138,7 @@ async fn handle_echo(
     sources: HandlerSources<MacroTestSession, MacroTestResource>,
     packet: MacroTestPacket,
 ) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     println!("ECHO handler called with packet: {:?}", packet);
 
     // Increment our counter to verify this was called
@@ -147,7 +157,7 @@ async fn default_handler(
     sources: HandlerSources<MacroTestSession, MacroTestResource>,
     packet: MacroTestPacket,
 ) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     println!("Default handler called with packet: {:?}", packet);
 
     let mut response = MacroTestPacket::ok();
@@ -159,7 +169,7 @@ async fn default_handler(
 }
 
 async fn error_handler(sources: HandlerSources<MacroTestSession, MacroTestResource>, error: Error) {
-    let mut socket = sources.socket;
+    let socket = sources.socket;
     eprintln!("Error handler called: {:?}", error);
 
     if let Err(e) = socket.send(MacroTestPacket::error(error)).await {
@@ -213,7 +223,7 @@ async fn test_handler_registration_mechanism() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Create client
-    let mut client = AsyncClient::<MacroTestPacket>::new("127.0.0.1", port)
+    let mut client = AsyncClient::<MacroTestPacket, Resources>::new("127.0.0.1", port)
         .await
         .expect("Failed to connect to server");
 
@@ -327,7 +337,7 @@ async fn test_multiple_packet_types() {
         "ALT_MSG",
         |sources, packet| {
             Box::pin(async move {
-                let mut socket = sources.socket;
+                let socket = sources.socket;
                 println!("ALT_MSG handler called with packet: {:?}", packet);
 
                 // Update the counter
@@ -353,7 +363,7 @@ async fn test_multiple_packet_types() {
         sources: HandlerSources<MacroTestSession, MacroTestResource>,
         packet: AlternatePacket,
     ) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         println!("Alt default handler called with packet: {:?}", packet);
         socket.send(AlternatePacket::ok()).await.ok();
     }
@@ -362,7 +372,7 @@ async fn test_multiple_packet_types() {
         sources: HandlerSources<MacroTestSession, MacroTestResource>,
         error: Error,
     ) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         socket.send(AlternatePacket::error(error)).await.ok();
     }
 
@@ -388,7 +398,7 @@ async fn test_multiple_packet_types() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Create client
-    let mut client = AsyncClient::<AlternatePacket>::new("127.0.0.1", port)
+    let mut client = AsyncClient::<AlternatePacket, Resources>::new("127.0.0.1", port)
         .await
         .expect("Failed to connect to server");
 
@@ -473,10 +483,10 @@ async fn test_multiple_handlers_same_header() {
         HANDLER1_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // First handler can optionally modify the packet or do initial processing
-        let resource_guard = sources.resources.read().await;
+        let resource_guard = sources.resources;
         println!(
             "Handler 1 read resource data length: {}",
-            resource_guard.data.len()
+            resource_guard.data.lock().unwrap().len()
         );
     }
 
@@ -488,8 +498,12 @@ async fn test_multiple_handlers_same_header() {
         HANDLER2_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Second handler can add information to resources
-        let mut resource_guard = sources.resources.write().await;
-        resource_guard.data.push("Handler 2 was here".to_string());
+        let resource_guard = sources.resources;
+        resource_guard
+            .data
+            .lock()
+            .unwrap()
+            .push("Handler 2 was here".to_string());
     }
 
     async fn test_multi_handler3(
@@ -500,7 +514,7 @@ async fn test_multiple_handlers_same_header() {
         HANDLER3_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Third handler sends response
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         let mut response = MacroTestPacket::ok();
         response.data = Some("All handlers processed".to_string());
 
@@ -517,7 +531,7 @@ async fn test_multiple_handlers_same_header() {
         packet: MacroTestPacket,
     ) {
         println!("Default handler called with packet: {:?}", packet);
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         let mut response = MacroTestPacket::ok();
         response.data = Some("Default handler response".to_string());
 
@@ -530,13 +544,13 @@ async fn test_multiple_handlers_same_header() {
         sources: HandlerSources<MacroTestSession, MacroTestResource>,
         error: Error,
     ) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         socket.send(MacroTestPacket::error(error)).await.ok();
     }
 
     // Create custom resource with initial data
     let custom_resources = MacroTestResource {
-        data: vec!["Initial resource data".to_string()],
+        data: Arc::new(Mutex::new(vec!["Initial resource data".to_string()])),
     };
 
     // Create server
@@ -607,7 +621,7 @@ async fn test_multiple_handlers_same_header() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Create client
-    let mut client = AsyncClient::<MacroTestPacket>::new("127.0.0.1", port)
+    let mut client = AsyncClient::<MacroTestPacket, Resources>::new("127.0.0.1", port)
         .await
         .expect("Failed to connect to server");
 
@@ -671,8 +685,12 @@ async fn test_handler_execution_order() {
         println!("Handler 1 executed at position: {}", position);
 
         // First handler writes to resources
-        let mut resource_guard = sources.resources.write().await;
-        resource_guard.data.push("Handler 1 execution".to_string());
+        let resource_guard = sources.resources;
+        resource_guard
+            .data
+            .lock()
+            .unwrap()
+            .push("Handler 1 execution".to_string());
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -685,10 +703,12 @@ async fn test_handler_execution_order() {
         println!("Handler 2 executed at position: {}", position);
 
         // Second handler reads and writes to resources
-        let mut resource_guard = sources.resources.write().await;
-        let len = resource_guard.data.len();
+        let resource_guard = sources.resources;
+        let len = resource_guard.data.lock().unwrap().len();
         resource_guard
             .data
+            .lock()
+            .unwrap()
             .push(format!("Handler 2 sees {} items", len));
     }
 
@@ -702,13 +722,13 @@ async fn test_handler_execution_order() {
         println!("Handler 3 executed at position: {}", position);
 
         // Third handler reads from resources and sends response
-        let resource_guard = sources.resources.read().await;
+        let resource_guard = sources.resources.clone();
 
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         let mut response = MacroTestPacket::ok();
         response.data = Some(format!(
             "Final resource state: {} items",
-            resource_guard.data.len()
+            resource_guard.data.lock().unwrap().len()
         ));
 
         if let Err(e) = socket.send(response).await {
@@ -724,7 +744,7 @@ async fn test_handler_execution_order() {
         packet: MacroTestPacket,
     ) {
         println!("Default handler called for packet: {:?}", packet);
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         let mut response = MacroTestPacket::ok();
         response.data = Some("Default handler response".to_string());
 
@@ -737,13 +757,13 @@ async fn test_handler_execution_order() {
         sources: HandlerSources<MacroTestSession, MacroTestResource>,
         error: Error,
     ) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         socket.send(MacroTestPacket::error(error)).await.ok();
     }
 
     // Create custom resource with initial data
     let custom_resources = MacroTestResource {
-        data: vec!["Initial state".to_string()],
+        data: Arc::new(Mutex::new(vec!["Initial state".to_string()])),
     };
 
     // First create server, then register handlers, then run server
@@ -788,7 +808,7 @@ async fn test_handler_execution_order() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Create client
-    let mut client = AsyncClient::<MacroTestPacket>::new("127.0.0.1", port)
+    let mut client = AsyncClient::<MacroTestPacket, Resources>::new("127.0.0.1", port)
         .await
         .expect("Failed to connect to server");
 
@@ -863,8 +883,12 @@ async fn test_error_handling_in_multiple_handlers() {
         HANDLER1_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // First handler does something harmless
-        let mut resource_guard = sources.resources.write().await;
-        resource_guard.data.push("Handler 1 was here".to_string());
+        let resource_guard = sources.resources;
+        resource_guard
+            .data
+            .lock()
+            .unwrap()
+            .push("Handler 1 was here".to_string());
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -878,7 +902,7 @@ async fn test_error_handling_in_multiple_handlers() {
 
         if should_error.load(std::sync::atomic::Ordering::SeqCst) {
             println!("Handler 2 is going to error out");
-            let mut socket = sources.socket;
+            let socket = sources.socket;
             socket
                 .send(MacroTestPacket::error(Error::Error(
                     "Deliberate error".to_string(),
@@ -887,12 +911,15 @@ async fn test_error_handling_in_multiple_handlers() {
                 .ok();
             // This doesn't stop execution of the next handler!
         } else {
-            let mut resource_guard = sources.resources.write().await;
-            resource_guard.data.push("Handler 2 was here".to_string());
+            let resource_guard = sources.resources.clone();
+            resource_guard
+                .data
+                .lock()
+                .unwrap()
+                .push("Handler 2 was here".to_string());
         }
     }
 
-    
     #[allow(clippy::significant_drop_tightening)]
     async fn fault_handler3(
         sources: HandlerSources<MacroTestSession, MacroTestResource>,
@@ -902,10 +929,10 @@ async fn test_error_handling_in_multiple_handlers() {
         HANDLER3_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Third handler still runs and sends the response
-        let resource_guard = sources.resources.read().await;
-        let entries = resource_guard.data.len();
+        let resource_guard = sources.resources.clone();
+        let entries = resource_guard.data.lock().unwrap().len();
 
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         let mut response = MacroTestPacket::ok();
         response.data = Some(format!(
             "All 3 handlers completed, resource has {} entries",
@@ -923,7 +950,7 @@ async fn test_error_handling_in_multiple_handlers() {
         packet: MacroTestPacket,
     ) {
         println!("Default handler called for packet: {:?}", packet);
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         let mut response = MacroTestPacket::ok();
         response.data = Some("Default handler response".to_string());
 
@@ -937,13 +964,13 @@ async fn test_error_handling_in_multiple_handlers() {
         error: Error,
     ) {
         println!("Error handler called: {:?}", error);
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         socket.send(MacroTestPacket::error(error)).await.ok();
     }
 
     // Create custom resource
     let custom_resources = MacroTestResource {
-        data: vec!["Initial state".to_string()],
+        data: Arc::new(Mutex::new(vec!["Initial state".to_string()])),
     };
 
     println!("Starting fault handler test server on port {}", port);
@@ -994,7 +1021,7 @@ async fn test_error_handling_in_multiple_handlers() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Create client
-    let mut client = AsyncClient::<MacroTestPacket>::new("127.0.0.1", port)
+    let mut client = AsyncClient::<MacroTestPacket, Resources>::new("127.0.0.1", port)
         .await
         .expect("Failed to connect to server");
 

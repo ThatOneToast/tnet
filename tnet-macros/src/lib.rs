@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DataEnum, DeriveInput, Fields, FieldsNamed, Ident, ItemFn, ItemStruct, Lit,
-    LitStr, Meta, Token, Visibility,
+    Attribute, Data, DataEnum, DeriveInput, Error, Fields, FieldsNamed, Ident, ItemFn, ItemStruct,
+    Lit, LitStr, Meta, Token, Type, Visibility,
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
     punctuated::Punctuated,
@@ -44,122 +44,190 @@ pub fn register_scan_dir(_input: TokenStream) -> TokenStream {
 ///
 /// ## String Representation
 ///
-/// Each enum variant is converted to and from a string using its exact variant name:
+/// Each enum variant is converted to and from a string as follows:
+///
+/// - Unit variants (no fields): Just the variant name
+/// - Single-field variants: Variant name followed by underscore and field value
 ///
 /// ```
-/// # use tnet_macros::PacketHeader;
-/// #[derive(Debug, Clone, PacketHeader)]
+/// # use tnet_macros::ParseEnumString;
+/// #[derive(Debug, Clone, PartialEq, ParseEnumString)]
 /// pub enum ExampleHeader {
-///     Hello,
-///     World,
+///     Hello,                  // Unit variant
+///     Count(u16),             // Tuple variant with number
+///     World(String),          // Tuple variant with string
 /// }
 ///
 /// // Convert to string
-/// let header = ExampleHeader::Hello;
-/// assert_eq!(header.to_string(), "Hello");
+/// let header1 = ExampleHeader::Hello;
+/// let header2 = ExampleHeader::Count(42);
+/// let header3 = ExampleHeader::World(String::from("Earth"));
+/// assert_eq!(header1.to_string(), "Hello");
+/// assert_eq!(header2.to_string(), "Count_42");
+/// assert_eq!(header3.to_string(), "World_Earth");
 ///
 /// // Convert from string
-/// let parsed: ExampleHeader = "World".parse().unwrap();
-/// assert_eq!(parsed, ExampleHeader::World);
-///
-/// // From trait
-/// let from_str = ExampleHeader::from("Hello");
-/// let from_string = ExampleHeader::from(String::from("World"));
+/// let parsed1: ExampleHeader = "Hello".parse().unwrap();
+/// let parsed2: ExampleHeader = "Count_42".parse().unwrap();
+/// let parsed3: ExampleHeader = "World_Earth".parse().unwrap();
+/// assert_eq!(parsed1, ExampleHeader::Hello);
+/// assert_eq!(parsed2, ExampleHeader::Count(42));
+/// assert_eq!(parsed3, ExampleHeader::World(String::from("Earth")));
 /// ```
 ///
-/// ## Error Handling
+/// ## Supported Field Types
 ///
-/// When using `parse()`, a `Result` is returned:
-/// - `Ok(EnumValue)` for successful parsing
-/// - `Err(String)` with an error message for invalid strings
+/// The following field types are supported for tuple variants:
+/// - String and &str types
+/// - Numeric types (u8, u16, u32, u64, i8, i16, i32, i64, etc.)
+/// - Any type that implements FromStr and Display
 ///
-/// When using `From::from()` on invalid strings, it will panic with an error message.
+/// # Example Usage
 ///
-/// # Limitations
-///
-/// - This derive macro only works on enums with unit variants (no fields)
-/// - The string representation is case-sensitive
-/// - Variant names must be valid Rust identifiers
-///
-/// # Example
-///
-/// ```
-/// use tnet_macros::PacketHeader;
-/// use std::str::FromStr;
-///
-/// #[derive(Debug, Clone, PacketHeader)]
-/// pub enum PacketHeader {
-///     OK,
-///     ERROR,
-///     KeepAlive,
+/// ```rust
+/// #[derive(Debug, Clone, ParseEnumString, PartialEq)]
+/// pub enum Pools {
+///     MatchMaking1v1,              // Unit variant
+///     ActiveGames(String),         // String variant
+///     PlayerLimit(u16),            // Numeric variant
 /// }
 ///
-/// fn test() {
-///     // Display
-///     let header = ParseEnumString::OK;
-///     println!("Header: {}", header); // Prints: Header: OK
+/// // Creating and using the enum
+/// let pool1 = Pools::MatchMaking1v1;
+/// let pool2 = Pools::ActiveGames(String::from("1v1Games"));
+/// let pool3 = Pools::PlayerLimit(64);
 ///
-///     // FromStr
-///     let parsed = ParseEnumString::from_str("ERROR").unwrap();
-///     assert_eq!(parsed, ParseEnumString::ERROR);
+/// // String conversion
+/// println!("{}", pool1);  // Outputs: MatchMaking1v1
+/// println!("{}", pool2);  // Outputs: ActiveGames_1v1Games
+/// println!("{}", pool3);  // Outputs: PlayerLimit_64
 ///
-///     // From<&str>
-///     let from_str = ParseEnumString::from("KeepAlive");
-///     assert_eq!(from_str, ParseEnumString::KeepAlive);
+/// // Parsing from strings
+/// let parsed1: Pools = "MatchMaking1v1".parse().unwrap();
+/// let parsed2: Pools = "ActiveGames_1v1Games".parse().unwrap();
+/// let parsed3: Pools = "PlayerLimit_64".parse().unwrap();
 ///
-///     // From<String>
-///     let from_string = ParseEnumString::from(String::from("OK"));
-///     assert_eq!(from_string, ParseEnumString::OK);
-///
-///     // Error handling with parse
-///     let result = ParseEnumString::from_str("Unknown");
-///     assert!(result.is_err());
-///     assert_eq!(result.unwrap_err(), "Unknown variant: Unknown");
-/// }
+/// assert_eq!(parsed1, Pools::MatchMaking1v1);
+/// assert_eq!(parsed2, Pools::ActiveGames(String::from("1v1Games")));
+/// assert_eq!(parsed3, Pools::PlayerLimit(64));
 /// ```
 #[proc_macro_derive(ParseEnumString)]
 pub fn parse_enum_string(input: TokenStream) -> TokenStream {
-    // Parse the input tokens into a syntax tree
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-
-    // Extract enum variants
-    let variants = match &input.data {
-        Data::Enum(DataEnum { variants, .. }) => variants,
-        _ => panic!("ParseEnumString can only be derived for enums"),
+    let input = match syn::parse::<DeriveInput>(input) {
+        Ok(input) => input,
+        Err(e) => return TokenStream::from(e.to_compile_error()),
     };
 
-    // Generate match arms for to_string
-    let to_string_arms = variants.iter().map(|variant| {
-        let variant_name = &variant.ident;
-        // Ensure variant has no fields
-        match &variant.fields {
-            Fields::Unit => {}
-            _ => panic!("ParseEnumString only supports unit variants"),
+    let name = &input.ident;
+
+    let variants = match &input.data {
+        Data::Enum(data_enum) => &data_enum.variants,
+        _ => {
+            return TokenStream::from(
+                Error::new_spanned(&input, "ParseEnumString can only be derived for enums")
+                    .to_compile_error(),
+            );
         }
+    };
+
+    let display_arms = variants.iter().map(|variant| {
+        let variant_name = &variant.ident;
         let variant_str = variant_name.to_string();
-        quote! {
-            #name::#variant_name => #variant_str.to_string()
+
+        match &variant.fields {
+            Fields::Unit => {
+                quote! {
+                    #name::#variant_name => write!(f, "{}", #variant_str)
+                }
+            }
+
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                quote! {
+                    #name::#variant_name(val) => write!(f, "{}_{}", #variant_str, val.to_string())
+                }
+            }
+
+            Fields::Unnamed(fields) => {
+                let field_count = fields.unnamed.len();
+                let indices = (0..field_count).collect::<Vec<_>>();
+
+                let val_idents = indices.iter().map(|i| format_ident!("val{}", i));
+                let val_idents_ref = val_idents.clone();
+
+                quote! {
+                    #name::#variant_name(#(#val_idents),*) => {
+                        write!(f, "{}", #variant_str)?;
+                        #(write!(f, "_{}", #val_idents_ref.to_string())?;)*
+                        Ok(())
+                    }
+                }
+            }
+
+            Fields::Named(_) => Error::new_spanned(
+                variant,
+                "ParseEnumString does not support struct variants yet",
+            )
+            .to_compile_error(),
         }
     });
 
-    // Generate match arms for from_str
     let from_str_arms = variants.iter().map(|variant| {
         let variant_name = &variant.ident;
         let variant_str = variant_name.to_string();
-        quote! {
-            #variant_str => Ok(#name::#variant_name)
+
+        match &variant.fields {
+            Fields::Unit => {
+                quote! {
+                    s if s == #variant_str => Ok(Self::#variant_name)
+                }
+            },
+
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                let field_type = &fields.unnamed[0].ty;
+
+                quote! {
+                    s if s.starts_with(concat!(#variant_str, "_")) => {
+                        let val_str = &s[#variant_str.len() + 1..];
+                        match val_str.parse() {
+                            Ok(val) => Ok(Self::#variant_name(val)),
+                            Err(_) => Err(format!("Failed to parse value for {}: {}", #variant_str, val_str))
+                        }
+                    }
+                }
+            },
+
+            Fields::Unnamed(fields) => {
+                let field_count = fields.unnamed.len();
+
+                quote! {
+                    s if s.starts_with(#variant_str) => {
+                        let parts: Vec<&str> = s.splitn(#field_count + 1, '_').collect();
+                        if parts.len() != #field_count + 1 || parts[0] != #variant_str {
+                            return Err(format!("Invalid format for {}", #variant_str));
+                        }
+
+                        Err(format!("Multi-field parsing not fully implemented for {}", #variant_str))
+                    }
+                }
+            },
+            
+
+            Fields::Named(_) => {
+                quote! {
+                    s if s.starts_with(#variant_str) => {
+                        Err(format!("Struct variants not supported: {}", #variant_str))
+                    }
+                }
+            }
         }
     });
 
-    // Generate the implementation
     let expanded = quote! {
         impl std::fmt::Display for #name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let s = match self {
-                    #(#to_string_arms),*
-                };
-                write!(f, "{}", s)
+                match self {
+                    #(#display_arms),*
+                }
             }
         }
 
@@ -169,7 +237,7 @@ pub fn parse_enum_string(input: TokenStream) -> TokenStream {
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s {
                     #(#from_str_arms),*,
-                    _ => Err(format!("Unknown variant: {}", s))
+                    _ => Err(format!("Unknown variant or invalid format: {}", s))
                 }
             }
         }
@@ -187,8 +255,7 @@ pub fn parse_enum_string(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Return the generated implementation
-    expanded.into()
+    TokenStream::from(expanded)
 }
 
 /// Registers a function as a packet handler for a specific packet type.

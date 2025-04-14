@@ -67,6 +67,12 @@ pub struct MySession {
     duration: Duration,
 }
 
+impl Default for MySession {
+    fn default() -> Self {
+        Self::empty("".to_string())
+    }
+}
+
 impl ImplSession for MySession {
     fn id(&self) -> &str {
         &self.id
@@ -108,7 +114,7 @@ impl ImplResource for MyResource {
 #[tokio::test]
 async fn test_basic_server_setup() {
     async fn handle_ok(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         println!("Received packet: {:?}", packet);
         socket.send(MyPacket::ok()).await.unwrap();
     }
@@ -140,13 +146,16 @@ async fn test_basic_server_setup() {
     assert!(server.is_encryption_enabled());
 }
 
+#[derive(Clone, Default)]
+struct Resources;
+
 // Test the basic client setup from README
 #[tokio::test]
 async fn test_basic_client_setup() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     async fn handle_ok(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         println!("Server received packet: {:?}", packet);
 
         let mut response = MyPacket::ok();
@@ -161,7 +170,7 @@ async fn test_basic_client_setup() {
     }
 
     async fn handle_error(sources: HandlerSources<MySession, MyResource>, error: Error) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         if let Err(e) = socket.send(MyPacket::error(error)).await {
             eprintln!("Failed to send error response: {}", e);
         }
@@ -197,7 +206,7 @@ async fn test_basic_client_setup() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client_result = async {
-        let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8083)
+        let mut client = AsyncClient::<MyPacket, Resources>::new("127.0.0.1", 8083)
             .await?
             .with_credentials("admin", "password")
             .with_encryption_config(EncryptionConfig::default_on())
@@ -228,7 +237,7 @@ async fn test_basic_client_setup() {
 async fn test_full_client_server_communication() {
     // Server setup
     async fn handle_ok(sources: HandlerSources<MySession, MyResource>, _packet: MyPacket) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         socket.send(MyPacket::ok()).await.unwrap();
     }
 
@@ -251,7 +260,7 @@ async fn test_full_client_server_communication() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Client setup
-    let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8084)
+    let mut client = AsyncClient::<MyPacket, Resources>::new("127.0.0.1", 8084)
         .await
         .unwrap()
         .with_credentials("admin", "password");
@@ -267,7 +276,7 @@ async fn test_broadcasting() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     async fn handle_ok(sources: HandlerSources<MySession, MyResource>, packet: MyPacket) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         println!("Server received packet: {:?}", packet);
 
         let mut response = MyPacket::ok();
@@ -282,7 +291,7 @@ async fn test_broadcasting() {
     }
 
     async fn handle_error(sources: HandlerSources<MySession, MyResource>, error: Error) {
-        let mut socket = sources.socket;
+        let socket = sources.socket;
         if let Err(e) = socket.send(MyPacket::error(error)).await {
             eprintln!("Failed to send error response: {}", e);
         }
@@ -321,9 +330,9 @@ async fn test_broadcasting() {
     let broadcast_received_clone = broadcast_received.clone();
 
     let client_result = async {
-        let mut client = AsyncClient::<MyPacket>::new("127.0.0.1", 8085)
+        let mut client = AsyncClient::<MyPacket, Resources>::new("127.0.0.1", 8085)
             .await?
-            .with_broadcast_handler(Box::new(move |_packet| {
+            .with_broadcast_handler(Box::new(move |_packet, _resources| {
                 broadcast_received_clone.notify_one();
             }))
             .with_credentials("admin", "password")

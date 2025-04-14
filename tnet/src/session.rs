@@ -178,7 +178,7 @@ where
 ///     }
 /// }
 /// ```
-pub trait Session: Debug + Clone + Send + Sync + Serialize + DeserializeOwned {
+pub trait Session: Debug + Clone + Send + Sync + Serialize + DeserializeOwned + Default {
     /// Returns the unique identifier of the session.
     ///
     /// # Returns
